@@ -2,7 +2,7 @@
 // The database is gzip-compressed, ENCRYPTED (AES-256-GCM) and stored as one file in a private
 // GitHub repo. On start we restore and decrypt it; after changes we upload a fresh copy shortly
 // after. The repo keeps ONE commit, so it never grows. Zero dependencies.
-// Enabled when GITHUB_TOKEN, GITHUB_REPO and FITCREW_BACKUP_KEY are all set.
+// Enabled when a GitHub token, a repo and FITCREW_BACKUP_KEY are all set (FITCREW_GH_TOKEN / FITCREW_GH_REPO, or GITHUB_TOKEN / GITHUB_REPO).
 import { gzipSync, gunzipSync, } from 'node:zlib';
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
 import { readFileSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
@@ -12,15 +12,18 @@ import path from 'node:path';
 const MAGIC = Buffer.from('FCB1');
 
 export function persistConfig(env = process.env) {
-  const any = env.GITHUB_TOKEN || env.GITHUB_REPO || env.FITCREW_BACKUP_KEY;
+  // FITCREW_GH_* names win: some hosts reserve GITHUB_TOKEN / GITHUB_REPO for their own builds.
+  const token = env.FITCREW_GH_TOKEN || env.GITHUB_TOKEN;
+  const repo = env.FITCREW_GH_REPO || env.GITHUB_REPO;
+  const any = token || repo || env.FITCREW_BACKUP_KEY;
   if (!any) return null;
-  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO || !env.FITCREW_BACKUP_KEY) {
-    throw new Error('Saving to GitHub needs all three settings: GITHUB_TOKEN, GITHUB_REPO and FITCREW_BACKUP_KEY.');
+  if (!token || !repo || !env.FITCREW_BACKUP_KEY) {
+    throw new Error('Saving to GitHub needs all three settings: FITCREW_GH_TOKEN, FITCREW_GH_REPO and FITCREW_BACKUP_KEY (GITHUB_TOKEN and GITHUB_REPO also work).');
   }
   if (env.FITCREW_BACKUP_KEY.length < 20) throw new Error('FITCREW_BACKUP_KEY must be at least 20 characters.');
   return {
-    token: env.GITHUB_TOKEN,
-    repo: env.GITHUB_REPO,
+    token,
+    repo,
     branch: env.GITHUB_BRANCH ?? 'main',
     file: env.GITHUB_DB_FILE ?? 'fitcrew.db.enc',
     key: env.FITCREW_BACKUP_KEY,
