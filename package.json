@@ -1,0 +1,12 @@
+{
+  "name": "fitcrew",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --no-warnings --test test/*.test.js",
+    "start": "node --no-warnings server.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
