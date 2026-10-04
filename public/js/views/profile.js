@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { state, fmt, localDate } from '../state.js';
 import { paint, loading, guard } from '../shell.js';
 import { navigate } from '../router.js';
-import { toast, confirmSheet, icon } from '../ui.js';
+import { toast, confirmSheet, icon, sheet, avatarEl, squareJpeg } from '../ui.js';
 import { signOut, loadMe } from '../session.js';
 import { pushSupport, pushEnabled, enablePush, disablePush } from '../notify.js';
 import { showInstall, isStandalone } from '../install.js';
@@ -34,7 +34,8 @@ export async function profileView() {
     };
     main.replaceChildren(
       h('section', { class: 'profile-hero' },
-        h('span', { class: 'hero-avatar', 'aria-hidden': 'true' }, me.user.name.trim()[0]?.toUpperCase() ?? '?'),
+        h('button', { class: 'hero-avatar', type: 'button', 'aria-label': me.user.avatar ? 'Change your profile picture' : 'Add a profile picture', onclick: () => pictureSheet(me) },
+          avatarEl(me.user, 96), h('span', { class: 'hero-cam', 'aria-hidden': 'true' }, icon('camera', 16))),
         h('div', { class: 'hero-text' },
           h('h1', { class: 'hero-name' }, me.user.name),
           h('p', { class: 'sub' }, me.user.email),
@@ -95,4 +96,31 @@ async function notificationsPanel(me) {
       } }));
   }) : [];
   return [h('p', { class: 'group-label' }, 'Reminders'), h('section', { class: 'section set-list' }, row, ...toggles)];
+}
+
+/** Profile picture: pick a photo (cropped to a square on the phone) or remove the current one. */
+function pictureSheet(me) {
+  sheet('Profile picture', (close) => {
+    const status = h('p', { class: 'sub', 'aria-live': 'polite' });
+    const input = h('input', { type: 'file', accept: 'image/*', hidden: true, onchange: async (e) => {
+      const file = e.currentTarget.files?.[0];
+      if (!file) return;
+      status.textContent = 'Uploading…';
+      try {
+        const image = await squareJpeg(file);
+        await api('PUT', '/api/me/avatar', { image });
+        close(); toast('Profile picture updated'); await loadMe(); profileView();
+      } catch (err) { status.textContent = ''; toast(err.message, 'bad'); }
+    } });
+    const remove = async () => {
+      try { await api('DELETE', '/api/me/avatar'); close(); toast('Profile picture removed'); await loadMe(); profileView(); } catch (err) { toast(err.message, 'bad'); }
+    };
+    return h('div', { class: 'stack' },
+      h('div', { style: 'display:grid;place-items:center;padding:8px 0' }, avatarEl(me.user, 120)),
+      h('p', { class: 'sub', style: 'text-align:center' }, 'The crew sees it on the board and in the feed. It is cropped to a square.'),
+      input,
+      h('button', { class: 'btn block', onclick: () => input.click() }, icon('camera', 20), me.user.avatar ? 'Choose a new photo' : 'Choose a photo'),
+      me.user.avatar ? h('button', { class: 'btn ghost block', onclick: remove }, 'Remove picture') : null,
+      status);
+  });
 }

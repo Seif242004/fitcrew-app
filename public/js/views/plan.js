@@ -18,7 +18,7 @@ export async function planView() {
     const switcher = (wk.plan || wk.hasPending) ? seg([['meals', 'Meals'], ['training', 'Training']], mode, (v) => { mode = v; show(); }, 'Plan type') : null;
     const show = () => view.replaceChildren(mode === 'training' ? trainingPlan(wk) : mealsPlan(plan, hasPending));
     show();
-    main.replaceChildren(screenTip('plan', 'Your whole plan', 'Exact grams for every item, with cups and pieces where they fit. Rice and pasta are weighed dry. Swap any item, or tap the arrows on a meal to change the whole meal.'), switcher ? h('div', { style: 'margin:14px 0' }, switcher) : null, view);
+    main.replaceChildren(h('h1', { class: 'title', style: 'margin-bottom:12px' }, 'Your plan'), screenTip('plan', 'Your whole plan', 'Exact grams for every item, with cups and pieces where they fit. Rice and pasta are weighed dry. Swap any item, or tap the arrows on a meal to change the whole meal.'), switcher ? h('div', { style: 'margin:12px 0 4px' }, switcher) : null, view);
   }, run);
   await run();
 }
@@ -30,7 +30,6 @@ function trainingPlan({ plan, hasPending }) {
   if (!plan) return emptyState('Your training plan is being checked', 'It is drafted and waiting for admin approval.');
   const todayDow = new Date().getDay();
   return h('div', {},
-    h('h1', { class: 'title' }, 'Your training plan'),
     h('p', { class: 'sub', style: 'margin-top:6px' }, `${plan.daysPerWeek} sessions a week, started ${fmtDate(plan.startDate)}. Each session shows last time's numbers and what to aim for.`),
     hasPending ? h('p', { class: 'notice', style: 'margin-top:12px' }, 'A newer training plan is waiting for admin approval.') : null,
     ...(plan.warnings ?? []).map((w) => h('p', { class: 'notice', style: 'margin-top:10px' }, w)),
@@ -68,7 +67,7 @@ function mealsPlan(plan, hasPending) {
           canSwap ? h('button', { class: 'icon-btn meal-change', 'aria-label': `Change ${m.name.toLowerCase()} for another meal`, title: 'Change this meal', onclick: () => mealSheet({ date, meal: mi, onDone: reload }) }, icon('swap', 18)) : null),
         macroRow(m.totals),
         ...m.items.map((it) => h('div', { class: 'pitem' },
-          h('span', {}, h('span', { class: 'item-name' }, it.name.split(' (')[0]), h('span', { class: 'item-amt' }, (it.amount ?? `${it.grams} g`) + (it.hint ? ` · ${it.hint}` : ''))),
+          h('span', {}, h('span', { class: 'name-row' }, h('span', { class: 'item-name' }, it.name.split(' (')[0]), it.ar ? h('span', { class: 'ar', lang: 'ar', dir: 'rtl' }, it.ar) : null), h('span', { class: 'item-amt' }, (it.amount ?? `${it.grams} g`) + (it.hint ? ` · ${it.hint}` : ''))),
           h('span', { class: 'item-kcal' }, fmt(it.kcal)),
           canSwap ? swapLink({ ref: it.ref, date, name: it.name, count: it.alts, onDone: reload }) : null)))));
   };
@@ -82,8 +81,7 @@ function mealsPlan(plan, hasPending) {
     } catch (err) { toast(err.message, 'bad'); b.disabled = false; b.textContent = 'Make me a different plan'; }
   } }, 'Make me a different plan');
   return h('div', {},
-    h('h1', { class: 'title', style: 'margin-bottom:4px' }, 'Your plan'),
-    h('p', { class: 'sub' }, len === 1 ? 'The same simple plan every day. Swap anything for an equivalent.' : `Repeats every ${len} days.`),
+    h('p', { class: 'sub', style: 'margin-top:8px' }, len === 1 ? 'The same simple plan every day. Swap an item, or change a whole meal with the arrows.' : `Repeats every ${len} days.`),
     hasPending ? h('p', { class: 'notice', style: 'margin-top:12px' }, 'A newer plan is waiting for the admin.') : null,
     tabs, body,
     h('div', { class: 'stack', style: 'margin-top:24px' },

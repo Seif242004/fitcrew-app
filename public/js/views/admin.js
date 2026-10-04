@@ -3,7 +3,7 @@ import { api } from '../api.js';
 import { state, localDate, shiftDate, fmtDate, fmt } from '../state.js';
 import { paint, loading, guard } from '../shell.js';
 import { navigate } from '../router.js';
-import { sheet, toast, confirmSheet, field, numInput, foodPicker, exercisePicker, seg, icon, emptyState } from '../ui.js';
+import { sheet, toast, confirmSheet, field, numInput, foodPicker, exercisePicker, seg, icon, emptyState, avatarEl } from '../ui.js';
 import { loadMe } from '../session.js';
 import { scoreBars } from './progress.js';
 
@@ -40,21 +40,26 @@ export async function adminHome() {
       h('section', { class: 'section' },
         h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'People'), h('span', { class: 'sub' }, `${users.length}`)),
         users.map((u) => h('button', { class: 'list-row', onclick: () => navigate(`/admin/user/${u.id}`) },
+          avatarEl(u, 40),
           h('span', { class: 'grow' }, h('span', { class: 'strong' }, u.name, u.role === 'admin' ? ' · admin' : '', u.private ? ' · private' : '', u.active ? '' : ' · deactivated'),
             h('span', { class: 'sub' }, !u.hasProfile ? 'Has not finished setup' : !u.activePlanId ? 'No active plan' : u.avg7 === null ? 'No finished days yet' : `7-day average ${u.avg7}`)), icon('chevR', 20)))),
       h('section', { class: 'section' },
         h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Manage')),
         [['Gym check-ins', 'Attendance photos: approve, reject or revoke', () => navigate('/admin/checkins')],
          ['Competition prize', settings.competitionPrize ? `This month: ${settings.competitionPrize}` : 'What the month\'s winner gets. Shown on the Crew page.', () => prizeSheet(settings.competitionPrize, run)],
-         ['Reset leaderboard points', 'Everyone starts from zero today: points, season and streaks. Logs are kept.', () => confirmSheet('Reset everyone\'s points?', 'The leaderboard, season totals and streaks start again from today. Nothing logged is deleted, and personal progress charts are unchanged.', 'Reset points', async () => {
-           try { await api('POST', '/api/admin/reset-scores', { today: localDate() }); toast('Points reset. Everyone starts from zero today.'); } catch (e) { toast(e.message, 'bad'); }
-         }, true)],
-         ['Start everyone over', 'Wipe every member\'s plans, logs, training and photos. Accounts and sign-ins stay.', () => freshStartSheet()],
          ['Clean up old plans', 'Delete rejected drafts and plans that ended over 2 weeks ago, for everyone', () => cleanupSheet(null, run)],
          ['Foods', 'Edit the food list and nutrition values', () => navigate('/admin/foods')],
          ['Exercises', 'Edit the exercise library', () => navigate('/admin/exercises')],
          ['Activity log', 'Everything admins changed', () => navigate('/admin/audit')],
          ['Download backup', 'A copy of the whole database. Keep it private.', () => { location.href = '/api/admin/backup'; }]]
+          .map(([label, hint, go]) => h('button', { class: 'list-row', onclick: go }, h('span', { class: 'grow' }, h('span', { class: 'strong' }, label), h('span', { class: 'sub' }, hint)), icon('chevR', 20)))),
+      // Actions that affect everyone and cannot be undone sit apart, in red, so nobody taps them by accident.
+      h('p', { class: 'group-label danger-label' }, 'Danger zone'),
+      h('section', { class: 'section danger-zone' },
+        [['Reset leaderboard points', 'Everyone starts from zero today: points, season and streaks. Logs are kept.', () => confirmSheet('Reset everyone\'s points?', 'The leaderboard, season totals and streaks start again from today. Nothing logged is deleted, and personal progress charts are unchanged.', 'Reset points', async () => {
+           try { await api('POST', '/api/admin/reset-scores', { today: localDate() }); toast('Points reset. Everyone starts from zero today.'); } catch (e) { toast(e.message, 'bad'); }
+         }, true)],
+         ['Start everyone over', 'Wipe every member\'s plans, logs, training and photos. Accounts and sign-ins stay.', () => freshStartSheet()]]
           .map(([label, hint, go]) => h('button', { class: 'list-row', onclick: go }, h('span', { class: 'grow' }, h('span', { class: 'strong' }, label), h('span', { class: 'sub' }, hint)), icon('chevR', 20)))));
   }, run);
   await run();
@@ -98,8 +103,10 @@ export async function adminUser({ id }) {
     const self = u.id === state.me.user.id;
     main.replaceChildren(
       back('/admin', 'Admin'),
-      h('h1', { class: 'title' }, u.name),
-      h('p', { class: 'sub' }, `${u.email} · ${u.role === 'admin' ? 'Administrator' : 'Member'}${u.private ? ' · private (only admins see them)' : ''}${u.active ? '' : ' · deactivated'}`),
+      h('div', { class: 'row-flex', style: 'gap:14px;flex-wrap:nowrap;margin:4px 0 8px' }, avatarEl(u, 56),
+        h('div', { style: 'min-width:0' },
+          h('h1', { class: 'title', style: 'margin:0' }, u.name),
+          h('p', { class: 'sub' }, `${u.email} · ${u.role === 'admin' ? 'Administrator' : 'Member'}${u.private ? ' · private (only admins see them)' : ''}${u.active ? '' : ' · deactivated'}`))),
       d.profile ? h('button', { class: 'btn block', style: 'margin-top:14px', onclick: () => viewAs(u, '/today') }, `Open the app as ${u.name.split(' ')[0]}`) : null,
       d.profile ? h('section', { class: 'section' },
         h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Actions')),
@@ -152,7 +159,7 @@ export async function adminUser({ id }) {
         self ? null : h('button', { class: 'list-row', onclick: () => confirmSheet(u.role === 'admin' ? 'Make a member?' : 'Make an admin?', u.role === 'admin' ? `${u.name} will lose admin access.` : `${u.name} will be able to see and edit everyone's data.`, 'Confirm', async () => { try { await api('PUT', `/api/admin/users/${id}`, { role: u.role === 'admin' ? 'user' : 'admin' }); run(); } catch (e) { toast(e.message, 'bad'); } }) },
           h('span', { class: 'grow' }, h('span', { class: 'strong' }, u.role === 'admin' ? 'Remove admin access' : 'Make admin')), icon('chevR', 20)),
         self ? null : h('button', { class: 'list-row', onclick: () => confirmSheet(u.active ? 'Deactivate this account?' : 'Reactivate this account?', u.active ? `${u.name} will be signed out and cannot sign in. Their data is kept.` : `${u.name} will be able to sign in again.`, u.active ? 'Deactivate' : 'Reactivate', async () => { try { await api('PUT', `/api/admin/users/${id}`, { active: !u.active }); run(); } catch (e) { toast(e.message, 'bad'); } }, u.active) },
-          h('span', { class: 'grow' }, h('span', { class: 'strong' }, u.active ? 'Deactivate account' : 'Reactivate account')), icon('chevR', 20))));
+          h('span', { class: 'grow' }, h('span', { class: 'strong', style: u.active ? 'color:var(--bad)' : '' }, u.active ? 'Deactivate account' : 'Reactivate account')), icon('chevR', 20))));
   }, run);
   await run();
 }

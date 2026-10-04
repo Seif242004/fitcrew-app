@@ -48,8 +48,8 @@ export async function showInstall() {
     if (mode === 'ios') {
       return h('div', { class: 'stack' },
         h('ol', { class: 'isteps' },
-          step(1, 'Tap ', h('b', {}, 'Share'), ' ', shareIcon(), ' at the bottom of Safari (top right on iPad).'),
-          step(2, 'Scroll down and tap ', h('b', {}, 'Add to Home Screen'), ' ', plusBox(), '.'),
+          step(1, 'Tap ', h('span', { class: 'nowrap' }, h('b', {}, 'Share'), ' ', shareIcon()), ' at the bottom of Safari (top right on iPad).'),
+          step(2, 'Scroll down and tap ', h('span', { class: 'nowrap' }, h('b', {}, 'Add to Home Screen'), ' ', plusBox(), '.')),
           step(3, 'Tap ', h('b', {}, 'Add'), '. FitCrew appears on your home screen like any app.'),
           step(4, 'Open it from the home screen, then turn on reminders in Profile.')),
         h('p', { class: 'sub' }, 'Notifications on iPhone need iOS 16.4 or newer and only work once FitCrew is opened from the home screen.'));

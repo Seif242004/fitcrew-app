@@ -88,7 +88,10 @@ export async function onboardingView(edit) {
   const bind = (key, input, parse = (v) => v, target = p) => { input.addEventListener('input', () => { target[key] = parse(input.value); }); return input; };
   const msg = h('p', { class: 'error', role: 'alert' });
   const body = h('div', { class: 'stack-lg' });
-  const nav = h('div', { class: 'row-flex', style: 'margin-top:28px' });
+  // Typing fixes the problem: the error goes away at once instead of hanging until Next.
+  body.addEventListener('input', () => { msg.textContent = ''; });
+  // Back / Next stay at the bottom of the screen, where the thumb is, on every step.
+  const nav = h('div', { class: 'onb-nav' });
   const bar = h('div', { class: 'progress-steps', 'aria-hidden': 'true' });
   const heading = h('div', {});
 
@@ -96,10 +99,10 @@ export async function onboardingView(edit) {
     return h('div', { class: 'stack' },
       h('div', { class: 'field' }, h('span', {}, 'Sex'), seg([['male', 'Male'], ['female', 'Female']], p.sex, (v) => { p.sex = v; }, 'Sex'), h('small', {}, 'Used for the calorie formula.')),
       h('div', { class: 'grid3' },
-        field('Age', bind('age', numInput(p.age, { min: 18, max: 90, inputmode: 'numeric' })), null),
-        field('Height (cm)', bind('heightCm', numInput(p.heightCm, { min: 120, max: 230 }))),
-        field('Weight (kg)', bind('weightKg', numInput(p.weightKg, { min: 35, max: 300 })))),
-      h('p', { class: 'sub' }, 'FitCrew is for adults, 18 and over.'));
+        field('Age', bind('age', numInput(p.age, { min: 18, max: 90, inputmode: 'numeric', placeholder: '22' })), null),
+        field('Height (cm)', bind('heightCm', numInput(p.heightCm, { min: 120, max: 230, placeholder: '178' }))),
+        field('Weight (kg)', bind('weightKg', numInput(p.weightKg, { min: 35, max: 300, placeholder: '80' })))),
+      h('p', { class: 'meta' }, 'FitCrew is for adults, 18 and over.'));
   }
 
   // Photos replace the long tape-measure form: front/side/back, all optional, uploaded on submit.
@@ -266,7 +269,7 @@ export async function onboardingView(edit) {
   function validate() {
     if (step === 0) {
       const age = n(p.age); const hgt = n(p.heightCm); const wt = n(p.weightKg);
-      if (!age || age < 18) return 'Enter your age. FitCrew is for adults, 18 and over.';
+      if (!age || age < 18) return age ? 'FitCrew is for adults, 18 and over.' : 'Enter your age.';
       if (!hgt || hgt < 120 || hgt > 230) return 'Enter your height in centimetres, between 120 and 230.';
       if (!wt || wt < 35 || wt > 300) return 'Enter your weight in kilograms, between 35 and 300.';
     }
@@ -324,16 +327,16 @@ export async function onboardingView(edit) {
 
   function draw() {
     bar.replaceChildren(...STEPS.map((_, i) => h('i', { class: i <= step ? 'on' : '' })));
-    heading.replaceChildren(h('p', { class: 'sub' }, `Step ${step + 1} of ${STEPS.length}`), h('h1', { class: 'title' }, STEPS[step]),
+    heading.replaceChildren(h('p', { class: 'eyebrow' }, `Step ${step + 1} of ${STEPS.length}`), h('h1', { class: 'title' }, STEPS[step]),
       // First screen of a first setup: say what is coming so nobody wonders how long this takes.
       step === 0 && !edit ? h('p', { class: 'sub', style: 'margin:-8px 0 16px' }, `Hi ${(state.me?.user?.name ?? '').split(' ')[0]}. Five short steps, about 3 minutes, then your diet and training plans are made for you. You can change everything later.`) : null);
     body.replaceChildren(builders[step]());
     msg.textContent = '';
     const last = step === STEPS.length - 1;
-    const next = h('button', { class: 'btn', type: 'button' }, last ? (edit ? 'Save changes' : 'Make my plan') : 'Next');
+    const next = h('button', { class: 'btn grow', type: 'button' }, last ? (edit ? 'Save changes' : 'Make my plan') : 'Next', last ? null : icon('chevR', 18));
     next.addEventListener('click', () => {
       const bad = validate();
-      if (bad) { msg.textContent = bad; return; }
+      if (bad) { msg.textContent = bad; msg.scrollIntoView({ block: 'center' }); return; }
       if (last) submit(next); else { step++; draw(); window.scrollTo(0, 0); }
     });
     nav.replaceChildren(

@@ -47,6 +47,8 @@ export function registerSocial(c) {
   const members = (db) => db.prepare('SELECT u.id, u.name, u.private, p.data FROM users u JOIN profiles p ON p.user_id = u.id WHERE u.active = 1').all()
     .map((u) => ({ id: u.id, name: u.name, private: Boolean(u.private), hidden: Boolean(JSON.parse(u.data).hideFromLeaderboard) }));
   const privateIds = (db) => new Set(db.prepare('SELECT id FROM users WHERE private = 1').all().map((r) => r.id));
+  // Profile picture URL for a member, or null (the app shows their initial instead).
+  const avatarOf = (db, uid) => { const u = db.prepare('SELECT id, avatar_at FROM users WHERE id = ?').get(uid); return u?.avatar_at ? `/api/avatar/${u.id}?v=${encodeURIComponent(u.avatar_at)}` : null; };
   const isPrivate = (db, uid) => Boolean(db.prepare('SELECT private FROM users WHERE id = ?').get(uid)?.private);
 
   /** Points between two dates for every member, best first. Ties: more 70+ days, then name. */
@@ -108,7 +110,7 @@ export function registerSocial(c) {
       // Streak looks further back than the month (but never before a reset).
       const longer = scoresBetween(ctx.db, r.userId, clampFrom(ctx.db, addDaysStr(today, -100)), today);
       return {
-        name: r.name, isMe: r.userId === ctx.user.id, hidden: r.hidden, private: r.private,
+        name: r.name, avatar: avatarOf(ctx.db, r.userId), isMe: r.userId === ctx.user.id, hidden: r.hidden, private: r.private,
         points: r.points, days: r.days, days70: r.days70, avg: r.days ? Math.round(r.points / r.days) : null, week,
         streak: streak(longer, today), today: r.scores.find((s) => s.date === today)?.total ?? null,
         gym: plan ? attendance(ctx.db, r.userId, clampFrom(ctx.db, month.from), today) : null,
@@ -158,7 +160,7 @@ export function registerSocial(c) {
       items: rows.map((r) => {
         const mine = reacts.filter((x) => x.activity_id === r.id);
         return {
-          id: r.id, kind: r.kind, name: r.name, isMe: r.user_id === ctx.user.id, private: admin && priv.has(r.user_id), text: r.text, at: r.created_at,
+          id: r.id, kind: r.kind, name: r.name, avatar: avatarOf(ctx.db, r.user_id), isMe: r.user_id === ctx.user.id, private: admin && priv.has(r.user_id), text: r.text, at: r.created_at,
           reactions: Object.keys(REACTIONS).map((k) => ({ kind: k, emoji: REACTIONS[k], count: mine.filter((x) => x.kind === k).length, mine: mine.some((x) => x.kind === k && x.user_id === ctx.user.id) })),
         };
       }),

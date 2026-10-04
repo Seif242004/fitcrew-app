@@ -3,7 +3,7 @@ import { tour } from '../tour.js';
 import { loadMe } from '../session.js';
 import { api, send } from '../api.js';
 import { state, localDate, shiftDate, fmtDate, fmt } from '../state.js';
-import { paint, loading, guard } from '../shell.js';
+import { paint, loading, guard, onPull } from '../shell.js';
 import { navigate } from '../router.js';
 import { swapSheet, mealSheet } from '../swap.js';
 import { installCard } from '../install.js';
@@ -78,7 +78,9 @@ export async function todayView() {
       ui.open.add(mealIdx);
       const prev = it.log;
       it.log = prev ? null : eatenLog(it);
-      recompute(); render();
+      // Ticking on: the check pops and Android gives a tiny buzz.
+      if (!prev) { justKeys.add(it.key); navigator.vibrate?.(10); }
+      recompute(); render(); justKeys.clear();
       try {
         if (prev) await send('POST', '/api/log/remove', { date, ref: it.key });
         else await send('POST', '/api/log', { date, today, ref: it.key, status: 'eaten' });
@@ -91,6 +93,7 @@ export async function todayView() {
       const todo = m.items.filter((it) => !it.log);
       todo.forEach((it) => { it.log = eatenLog(it); });
       ui.open.delete(mealIdx);
+      navigator.vibrate?.(15);
       recompute(); render();
       try {
         for (const it of todo) await send('POST', '/api/log', { date, today, ref: it.key, status: 'eaten' });
@@ -148,6 +151,8 @@ export async function todayView() {
     render();
   }, () => todayView());
   // First open with a plan: the one-minute tour (once per phone, replay from Profile).
+  // Pull down to reload the day (another phone, or the coach, may have logged something).
+  onPull(async () => { await load(); render(); });
   if (own && d?.planId) tour();
 }
 
@@ -182,11 +187,10 @@ function build({ d, tr, scores, date, today, ui, act, extra }) {
     ...head,
     summaryCard(d, scores.get(date)),
     dayDoneCard(scores.get(date), date === today, extra),
-    weighInCard(extra, today, act),
     trainingOpen ? workoutRow(tr, true) : null,
-    recapCard(extra.recap, act),
     overBanner(d, act),
-    ...d.meals.map((m, i) => mealPanel(m, i, ui, act, i === next)),
+    // The weigh-in prompt sits after the next meal, so food stays the first thing on screen.
+    ...d.meals.flatMap((m, i) => [mealPanel(m, i, ui, act, i === next), i === Math.max(next, 0) ? [weighInCard(extra, today, act), recapCard(extra.recap, act)] : null]),
     extrasPanel(d.extras, act),
     askBar(act),
     trainingOpen ? null : workoutRow(tr, date === today),
@@ -300,7 +304,8 @@ function summaryCard(d, s) {
           h('defs', {}, h('linearGradient', { id: 'kgrad', x1: '0', y1: '0', x2: '1', y2: '1' },
             h('stop', { offset: '0', style: 'stop-color:var(--go)' }), h('stop', { offset: '1', style: 'stop-color:var(--go-2)' }))),
           h('circle', { class: 'track', cx: 64, cy: 64, r: R }),
-          h('circle', { class: 'fill', cx: 64, cy: 64, r: R, 'stroke-dasharray': `${C * pct} ${C}` })),
+          // Nothing eaten yet: no fill at all (a zero-length round cap would draw a stray dot).
+          pct > 0 ? h('circle', { class: 'fill', cx: 64, cy: 64, r: R, 'stroke-dasharray': `${C * pct} ${C}` }) : null),
         h('div', { class: 'center' }, h('b', {}, fmt(Math.abs(left))), h('span', {}, left < 0 ? 'kcal over' : 'kcal left'))),
       h('div', { class: 'macros' },
         macro('Protein', 'p', c.p, t.proteinG), macro('Carbs', 'c', c.c, t.carbsG), macro('Fat', 'f', c.f, t.fatG))),
@@ -396,6 +401,9 @@ function mealPanel(m, idx, ui, act, isNext = false) {
       h('button', { class: 'btn small', onclick: (e) => { e.currentTarget.disabled = true; act.logAll(idx); } }, icon('check', 16), 'Log all')));
 }
 
+// Items ticked in this render (their check animates once).
+const justKeys = new Set();
+
 // "Egyptian salad (salata baladi)" -> "Egyptian salad": the list stays readable; the sheet has the full name.
 const shortName = (n) => String(n).replace(/\s*\([^)]*\)\s*$/, '');
 
@@ -410,10 +418,10 @@ function itemRow(it, mealIdx, act) {
     : st === 'swapped' ? `Had ${shortName(it.log.name).toLowerCase()} instead, ${it.log.amount ?? `${it.log.grams} g`}`
     : st === 'skipped' ? 'Skipped' : planned;
   const kcal = st === 'adjusted' || st === 'swapped' ? it.log.kcal : st === 'skipped' ? 0 : it.kcal;
-  return h('div', { class: 'item', 'data-state': st },
+  return h('div', { class: `item${justKeys.has(it.key) ? ' just' : ''}`, 'data-state': st },
     h('button', { class: 'rowbtn', role: 'checkbox', 'aria-checked': String(st !== 'none' && st !== 'skipped'), 'aria-label': `${it.name}, ${planned}, ${fmt(kcal)} kcal`, onclick: () => act.toggle(it, mealIdx) },
       h('span', { class: 'tick' }, icon('check', 14)),
-      h('span', { class: 'item-main', style: 'padding:0;min-height:0' }, h('span', { class: 'item-name' }, shortName(it.name)), h('span', { class: 'item-amt' }, amt)),
+      h('span', { class: 'item-main', style: 'padding:0;min-height:0' }, h('span', { class: 'name-row' }, h('span', { class: 'item-name' }, shortName(it.name)), it.ar ? h('span', { class: 'ar', lang: 'ar', dir: 'rtl' }, it.ar) : null), h('span', { class: 'item-amt' }, amt)),
       h('span', { class: 'item-kcal' }, fmt(kcal))),
     h('button', { class: 'more', 'aria-label': `More options for ${it.name}`, onclick: () => act.options(it, act) }, icon('dots', 20)));
 }

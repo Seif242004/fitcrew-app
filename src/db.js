@@ -13,6 +13,12 @@ CREATE TABLE IF NOT EXISTS users (
   private INTEGER NOT NULL DEFAULT 0, -- admin-only: invisible to every other member everywhere
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+-- Profile pictures: one small square JPEG per person (users.avatar_at says it exists and busts caches).
+CREATE TABLE IF NOT EXISTS avatars (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  image BLOB NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS invites (
   code TEXT PRIMARY KEY,
   note TEXT,
@@ -327,6 +333,7 @@ function migrate(db) {
   // Private members (admin-only visibility) and private invites.
   const ucols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
   if (!ucols.has('private')) db.exec('ALTER TABLE users ADD COLUMN private INTEGER NOT NULL DEFAULT 0');
+  if (!ucols.has('avatar_at')) db.exec('ALTER TABLE users ADD COLUMN avatar_at TEXT'); // profile picture version
   // How a log was entered ("3 eggs", "1½ cups"), so it reads back the way the person said it.
   const lcols = new Set(db.prepare('PRAGMA table_info(logs)').all().map((c) => c.name));
   if (!lcols.has('amount')) db.exec('ALTER TABLE logs ADD COLUMN amount TEXT');

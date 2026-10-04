@@ -192,3 +192,36 @@ test('plans made by an older engine are rebuilt once, unless a person approved t
   await sam.get('/api/me');
   assert.equal(app.db.prepare("SELECT id FROM plans WHERE user_id = ? AND status = 'active'").get(uid).id, v2.id, 'only once');
 });
+
+test('profile pictures: upload, crew can see, private members hidden, remove', async (t) => {
+  const app = await boot();
+  t.after(app.close);
+  const admin = app.client();
+  await admin.post('/api/setup', { name: 'Haged', email: 'haged@example.com', password: 'a-good-password' });
+  const join = async (name, extra = {}) => {
+    const { code } = (await admin.post('/api/admin/invites', { note: name, ...extra })).body;
+    const c = app.client();
+    await c.post('/api/register', { code, name, email: `${name.toLowerCase()}@example.com`, password: 'a-good-password-1' });
+    return c;
+  };
+  const sam = await join('Sam'); const lea = await join('Lea');
+  // A tiny but valid JPEG header + padding (the server checks the magic bytes and size).
+  const jpeg = `data:image/jpeg;base64,${Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(800, 1)]).toString('base64')}`;
+  assert.equal((await sam.put('/api/me/avatar', { image: 'data:image/png;base64,AAAA' })).status, 400);
+  const up = await sam.put('/api/me/avatar', { image: jpeg });
+  assert.equal(up.status, 200);
+  assert.match(up.body.avatar, /^\/api\/avatar\/\d+\?v=/);
+  assert.equal((await sam.get('/api/me')).body.user.avatar, up.body.avatar);
+  const samId = (await sam.get('/api/me')).body.user.id;
+  assert.equal((await lea.get(`/api/avatar/${samId}`)).status, 200, 'the crew can load it');
+  assert.equal((await app.client().get(`/api/avatar/${samId}`)).status, 401, 'not without signing in');
+  // A private member's picture is only for them and admins.
+  app.db.prepare('UPDATE users SET private = 1 WHERE id = ?').run(samId);
+  assert.equal((await lea.get(`/api/avatar/${samId}`)).status, 404);
+  assert.equal((await admin.get(`/api/avatar/${samId}`)).status, 200);
+  assert.equal((await sam.get(`/api/avatar/${samId}`)).status, 200);
+  // Removing it.
+  assert.equal((await sam.call('DELETE', '/api/me/avatar')).status, 200);
+  assert.equal((await sam.get('/api/me')).body.user.avatar, null);
+  assert.equal((await admin.get(`/api/avatar/${samId}`)).status, 404);
+});

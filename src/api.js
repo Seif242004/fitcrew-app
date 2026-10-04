@@ -267,7 +267,9 @@ function subjectId(ctx, src = {}) {
   if (!ctx.db.prepare('SELECT 1 FROM users WHERE id = ?').get(id)) throw notFound('User not found');
   return id;
 }
-const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, active: Boolean(u.active), private: Boolean(u.private) });
+// Profile picture URL, versioned so a new photo shows at once while the old one stays cached.
+export const avatarUrl = (u) => (u?.avatar_at ? `/api/avatar/${u.id}?v=${encodeURIComponent(u.avatar_at)}` : null);
+const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, active: Boolean(u.active), private: Boolean(u.private), avatar: avatarUrl(u) });
 
 // ---------- routes ----------
 const routes = [];
@@ -450,6 +452,7 @@ route('GET', '/api/today', 'user', (ctx) => {
         key, ...it,
         amount: fd ? describeAmount(fd, it.grams) : `${it.grams} g`,
         hint: fd ? amountHint(fd, it.grams) : null,
+        ar: fd?.ar ?? '',
         units: fd ? unitsFor(fd) : [{ key: 'g', name: 'g', plural: 'g', g: 1, step: 5, grams: true }],
         per100: fd ? { kcal: fd.kcal, p: fd.p, c: fd.c, f: fd.f } : null,
         log: l ? { status: l.status, foodId: l.food_id, name: l.name, grams: l.grams, kcal: l.kcal, p: l.p, c: l.c, f: l.f, amount: l.amount ?? (lf ? describeAmount(lf, l.grams) : `${l.grams} g`) } : null,
@@ -957,6 +960,36 @@ route('POST', '/api/log/remove', 'user', (ctx) => {
   ctx.db.prepare('DELETE FROM logs WHERE user_id = ? AND date = ? AND ref = ?').run(uid, needDate(ctx.body.date), str(ctx.body.ref, 30, 'ref', true));
   if (uid !== ctx.user.id) audit(ctx.db, ctx.user.id, 'log.removed_by_admin', uid, { date: ctx.body.date, ref: ctx.body.ref });
   return { ok: true };
+});
+
+// ---------- profile pictures ----------
+// Small square JPEGs (the phone crops and shrinks them first). Visible to the crew, except a
+// private member's picture, which only they and admins can load.
+route('PUT', '/api/me/avatar', 'user', (ctx) => {
+  const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(String(ctx.body.image ?? ''));
+  if (!m) throw bad('Send the picture as a JPEG');
+  const buf = Buffer.from(m[1], 'base64');
+  if (buf.length < 500 || buf[0] !== 0xff || buf[1] !== 0xd8 || buf[2] !== 0xff) throw bad('That file is not a valid JPEG');
+  if (buf.length > 200_000) throw bad('That picture is too large');
+  const at = new Date().toISOString();
+  ctx.db.prepare('INSERT INTO avatars (user_id, image, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET image = excluded.image, updated_at = excluded.updated_at').run(ctx.user.id, buf, at);
+  ctx.db.prepare('UPDATE users SET avatar_at = ? WHERE id = ?').run(at, ctx.user.id);
+  return { ok: true, avatar: avatarUrl({ id: ctx.user.id, avatar_at: at }) };
+});
+
+route('DELETE', '/api/me/avatar', 'user', (ctx) => {
+  ctx.db.prepare('DELETE FROM avatars WHERE user_id = ?').run(ctx.user.id);
+  ctx.db.prepare('UPDATE users SET avatar_at = NULL WHERE id = ?').run(ctx.user.id);
+  return { ok: true };
+});
+
+route('GET', '/api/avatar/:id', 'user', (ctx) => {
+  const id = Number(ctx.params.id);
+  const u = ctx.db.prepare('SELECT id, active, private FROM users WHERE id = ?').get(id);
+  const allowed = u && (id === ctx.user.id || ctx.user.role === 'admin' || (u.active && !u.private));
+  const row = allowed && ctx.db.prepare('SELECT image FROM avatars WHERE user_id = ?').get(id);
+  if (!row) throw notFound('No picture');
+  return { __raw: Buffer.from(row.image), headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=604800, immutable' } };
 });
 
 // ---------- progress photos (private: the owner and admins only) ----------

@@ -5,8 +5,8 @@ import { h } from '../dom.js';
 import { screenTip } from '../tour.js';
 import { api } from '../api.js';
 import { state, localDate, fmtDate, fmt } from '../state.js';
-import { paint, loading, guard } from '../shell.js';
-import { emptyState, sheet, toast, icon } from '../ui.js';
+import { paint, loading, guard, onPull } from '../shell.js';
+import { emptyState, sheet, toast, icon, avatarEl } from '../ui.js';
 
 export async function groupView() {
   const main = paint('group', loading());
@@ -32,6 +32,7 @@ export async function groupView() {
         const rank = scored.includes(b) ? scored.indexOf(b) + 1 : null;
         return h('div', { class: 'list-row', style: 'cursor:default' },
           h('span', { class: 'rank' }, rank ?? '–'),
+          avatarEl(b, 36),
           h('span', { class: 'grow' },
             h('span', { class: 'strong' }, b.isMe ? `${b.name} (you)` : b.name, trophyBadge(b.trophies)),
             h('span', { class: 'sub' }, detail(b))),
@@ -41,6 +42,7 @@ export async function groupView() {
       champions.length ? hallOfFame(champions) : null,
       resetAt ? h('p', { class: 'meta', style: 'margin-top:14px' }, `Season started ${fmtDate(resetAt, { day: 'numeric', month: 'long' })}.`) : null);
   }, run);
+  onPull(run); // pull down to reload the board and the feed
   await run();
 }
 
@@ -79,6 +81,7 @@ function podium(top) {
     const place = k === 1 ? 1 : k === 0 ? 2 : 3;
     return h('div', { class: `step p${place} ${b.isMe ? 'me' : ''}`, 'aria-label': `${place}. ${b.name}, ${b.points} points this month` },
       h('div', { class: 'medal' }, place === 1 ? icon('trophy', 18) : place),
+      avatarEl(b, place === 1 ? 52 : 44, 'step-pic'),
       h('div', { class: 'who' }, b.isMe ? 'You' : b.name, trophyBadge(b.trophies)),
       h('div', { class: 'pts' }, fmt(b.points)),
       h('small', {}, `${b.avg} a day`),
@@ -145,6 +148,7 @@ function feedItem(it) {
   draw();
   return h('article', { class: `feed-item k-${it.kind}` },
     h('span', { class: 'avatar', 'aria-hidden': 'true' }, it.name.trim()[0]?.toUpperCase() ?? '?',
+      it.avatar ? h('img', { src: it.avatar, alt: '', loading: 'lazy', onerror: (e) => e.currentTarget.remove() }) : null,
       h('span', { class: 'kind' }, icon(KIND_ICON[it.kind] ?? 'spark', 11))),
     h('div', { class: 'grow' },
       h('p', { class: 'feed-text' }, h('b', {}, it.isMe ? 'You' : it.name), ' ', it.isMe ? youText(it.text) : it.text, it.private ? h('span', { class: 'meta' }, ' · private, only admins see this') : null),

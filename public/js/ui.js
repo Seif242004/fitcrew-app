@@ -255,7 +255,8 @@ export function amountPicker({ units, grams = 0, planned = null, per100 = null, 
   const snap = (q, u) => Math.max(0, Math.round(q / u.step) * u.step);
   let qty = grams > 0 ? (unit.grams ? Math.round(grams / unit.g) : snap(grams / unit.g, unit)) : (unit.grams ? 100 : 1);
 
-  const input = h('input', { class: 'amt-input', type: 'number', inputmode: 'decimal', step: 'any', min: 0, 'aria-label': 'Amount' });
+  // Text, not number, so counts read the way people say them (1½ loaves); typing 1.5 also works.
+  const input = h('input', { class: 'amt-input', type: 'text', inputmode: 'decimal', autocomplete: 'off', 'aria-label': 'Amount' });
   const unitName = h('span', { class: 'amt-unit' });
   const preview = h('p', { class: 'amt-preview', 'aria-live': 'polite' });
   const unitsRow = list.length > 1 ? h('div', { class: 'amt-units', role: 'radiogroup', 'aria-label': 'Measure in' }) : null;
@@ -263,7 +264,7 @@ export function amountPicker({ units, grams = 0, planned = null, per100 = null, 
   const gramsOf = () => Math.round(qty * unit.g * 10) / 10;
 
   const draw = (fromTyping = false) => {
-    if (!fromTyping) input.value = unit.grams ? String(Math.round(qty)) : String(qty);
+    if (!fromTyping) input.value = unit.grams ? String(Math.round(qty)) : nice(qty);
     unitName.textContent = unit.grams ? (unit.key === 'dry' ? 'g dry' : 'g') : (qty <= 1 ? unit.name : unit.plural);
     const g = gramsOf();
     const m = per100 ? (k) => Math.round(((per100[k] ?? 0) * g) / (k === 'kcal' ? 100 : 10)) / (k === 'kcal' ? 1 : 10) : null;
@@ -295,7 +296,10 @@ export function amountPicker({ units, grams = 0, planned = null, per100 = null, 
     onChange({ unit: unit.key, qty, grams: gramsOf(), label: qtyLabel(unit, qty) });
   };
   const bump = (d) => { qty = Math.max(0, Math.round((qty + d * (unit.grams ? (unit.key === 'g' ? 10 : 5) : unit.step)) * 100) / 100); draw(); };
-  input.addEventListener('input', () => { const v = Number(input.value); if (Number.isFinite(v) && v >= 0) { qty = v; draw(true); } });
+  // "1½" -> 1.5, "½" -> 0.5, "1,5" -> 1.5
+  const parse = (t) => Number(String(t).trim().replace(',', '.').replace(/^(\d*)\s*½$/, (_, w) => `${w || 0}.5`));
+  input.addEventListener('input', () => { const v = parse(input.value); if (input.value.trim() && Number.isFinite(v) && v >= 0) { qty = v; draw(true); } });
+  input.addEventListener('blur', () => draw());
 
   const el = h('div', { class: 'amt' },
     unitsRow,
@@ -306,4 +310,45 @@ export function amountPicker({ units, grams = 0, planned = null, per100 = null, 
     quick, preview);
   draw();
   return { el, value: () => ({ unit: unit.key, qty, grams: gramsOf(), label: qtyLabel(unit, qty) }) };
+}
+
+// ---------- profile pictures ----------
+/**
+ * A person's picture, or their initial on the accent gradient when they have none.
+ *   who   { name, avatar }   avatar is the versioned /api/avatar/... URL from the server
+ *   size  pixels (square)
+ */
+export function avatarEl(who, size = 36, cls = '') {
+  const initial = (who?.name ?? '?').trim()[0]?.toUpperCase() ?? '?';
+  const el = h('span', { class: `pic ${cls}`, style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px`, 'aria-hidden': 'true' }, initial);
+  if (who?.avatar) {
+    const img = h('img', { src: who.avatar, alt: '', width: size, height: size, loading: 'lazy', decoding: 'async' });
+    // A missing or blocked picture falls back to the initial.
+    img.addEventListener('error', () => img.remove());
+    el.append(img);
+  }
+  return el;
+}
+
+/**
+ * Turns a phone photo into a centred square JPEG (default 320 px, under ~60 KB) for the profile
+ * picture, so the upload is instant and the database stays small.
+ */
+export function squareJpeg(file, { size = 320, maxBytes = 60_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const side = Math.min(img.width, img.height);
+      const c = document.createElement('canvas');
+      c.width = size; c.height = size;
+      c.getContext('2d').drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, size, size);
+      URL.revokeObjectURL(url);
+      let q = 0.86; let out = c.toDataURL('image/jpeg', q);
+      while (out.length * 0.75 > maxBytes && q > 0.45) { q -= 0.08; out = c.toDataURL('image/jpeg', q); }
+      resolve(out);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That photo could not be opened. Try a JPEG or PNG.')); };
+    img.src = url;
+  });
 }

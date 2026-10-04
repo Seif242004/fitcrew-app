@@ -1,4 +1,4 @@
-const CACHE = 'fitcrew-v11';
+const CACHE = 'fitcrew-v15';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => {

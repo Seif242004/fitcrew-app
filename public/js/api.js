@@ -55,7 +55,8 @@ export async function api(method, path, body) {
   const data = await res.json().catch(() => ({}));
   if (res.ok && method === 'GET' && OFFLINE_GETS.some((p) => url.startsWith(p))) { try { localStorage.setItem(`fc.get:${url}`, JSON.stringify(data)); } catch { /* full */ } }
   if (!res.ok) {
-    const e = new Error(data.error ?? 'Something went wrong');
+    // The server's own message when it sent one; otherwise something a person can act on.
+    const e = new Error(data.error ?? (res.status >= 500 ? 'The server had a problem. Try again in a moment.' : 'That did not work. Try again.'));
     e.status = res.status;
     throw e;
   }
