@@ -1,8 +1,10 @@
 import { h } from '../dom.js';
+import { screenTip } from '../tour.js';
 import { api } from '../api.js';
 import { state, localDate, shiftDate, fmtDate, fmt1 } from '../state.js';
 import { paint, loading, guard } from '../shell.js';
-import { sheet, toast, field, numInput, confirmSheet } from '../ui.js';
+import { sheet, toast, field, numInput, confirmSheet, icon, seg, dateChip } from '../ui.js';
+import { loadMe } from '../session.js';
 
 const MEASURES = [['waistCm', 'Waist'], ['neckCm', 'Neck'], ['hipCm', 'Hips'], ['chestCm', 'Chest'], ['armCm', 'Upper arm'], ['thighCm', 'Thigh'], ['calfCm', 'Calf']];
 
@@ -49,7 +51,7 @@ export async function progressView() {
     const latest = weights.at(-1);
     const first = weights[0];
 
-    const date = h('input', { type: 'date', value: today, max: today, 'aria-label': 'Weigh-in date' });
+    const date = dateChip(today, { max: today, label: 'Weigh-in date' });
     const kg = numInput('', { min: 30, max: 400, placeholder: latest ? fmt1(latest.weightKg) : '0.0', 'aria-label': 'Weight in kilograms' });
     const save = async () => {
       if (!kg.value) { toast('Enter your weight', 'bad'); return; }
@@ -61,25 +63,20 @@ export async function progressView() {
 
     main.replaceChildren(
       h('h1', { class: 'title' }, 'Progress'),
+      screenTip('progress', 'Track the trend, not the day', 'Weigh in once a week, same time, same scale. Add front, side and back photos every 2–4 weeks; only you and the admin can see them.'),
       h('section', { class: 'section' },
         h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Weight')),
         latest ? h('div', { style: 'margin:14px 0' },
           h('span', { class: 'big', style: 'font-size:64px' }, fmt1(latest.weightKg)), h('span', { class: 'sub' }, ' kg'),
           weights.length > 1 ? h('p', { class: 'sub' }, `${latest.weightKg - first.weightKg > 0 ? '+' : ''}${fmt1(latest.weightKg - first.weightKg)} kg since ${fmtDate(first.date)}`) : null) : null,
         weights.length >= 2 ? weightChart(weights) : h('p', { class: 'muted', style: 'margin:12px 0' }, 'Log your weight a few times and the trend line appears here.'),
-        h('div', { class: 'row-flex', style: 'margin-top:14px;align-items:flex-end' },
-          h('div', { style: 'flex:1' }, field('Date', date)), h('div', { style: 'flex:1' }, field('Weight (kg)', kg)), h('button', { class: 'btn', onclick: save }, 'Save')),
+        h('div', { class: 'weigh', style: 'margin-top:14px' }, field('Date', date), field('Weight (kg)', kg), h('button', { class: 'btn', onclick: save }, 'Save')),
         h('p', { style: 'margin-top:8px' }, h('button', { class: 'link', onclick: () => measureSheet(today, run) }, 'Add body measurements'))),
       h('section', { class: 'section' },
         h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Last 14 days'), h('span', { class: 'sub' }, avg === null ? '' : `Average ${avg}`)),
         h('div', { style: 'margin-top:12px' }, scoreBars(adh.scores, today)),
         h('p', { class: 'sub', style: 'margin-top:6px' }, adh.streak > 0 ? `${adh.streak}-day streak of days scoring 70 or more.` : 'A day scoring 70 or more starts a streak.')),
-      h('section', { class: 'section' },
-        h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Photos'), h('span', { class: 'sub' }, 'Only you and the admin can see these')),
-        photos.length ? h('div', { class: 'photo-grid' }, photos.slice(0, 18).map((ph) => h('button', { class: 'photo', 'aria-label': `${ph.pose} photo, ${fmtDate(ph.date)}`, onclick: () => photoSheet(ph, run) },
-          h('img', { src: `/api/photos/${ph.id}`, alt: '', loading: 'lazy' }), h('span', {}, `${fmtDate(ph.date, { day: 'numeric', month: 'short' })} · ${ph.pose}`))))
-          : h('p', { class: 'muted', style: 'margin:12px 0' }, 'Take a front, side and back photo every few weeks. The admin uses them, with your measurements, to judge your shape and adjust your plan.'),
-        h('p', { style: 'margin-top:8px' }, h('button', { class: 'link', onclick: () => addPhotoSheet(today, run) }, 'Add a photo'))),
+      photosSection(photos, today, run),
       withMeasures.length ? h('section', { class: 'section' },
         h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Measurements')),
         withMeasures.map((m) => h('div', { class: 'list-row', style: 'cursor:default' },
@@ -90,7 +87,7 @@ export async function progressView() {
 
 function measureSheet(today, done) {
   sheet('Body measurements', (close) => {
-    const date = h('input', { type: 'date', value: today, max: today });
+    const date = dateChip(today, { max: today, label: 'Measurement date' });
     const inputs = Object.fromEntries(MEASURES.map(([k]) => [k, numInput('', { min: 10, max: 250 })]));
     return h('div', { class: 'stack' },
       field('Date', date),
@@ -103,41 +100,109 @@ function measureSheet(today, done) {
   });
 }
 
-/** Shrinks a phone photo to a 900 px JPEG in the browser so uploads stay small and fast. */
-function shrink(file) {
+/**
+ * Shrinks a phone photo to a small JPEG in the browser so uploads stay fast and the database small.
+ * Large photos are re-encoded until they fit `maxBytes`.
+ */
+export function shrink(file, { max = 800, quality = 0.72, maxBytes = 170_000 } = {}) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
-      const scale = Math.min(1, 900 / Math.max(img.width, img.height));
+      const scale = Math.min(1, max / Math.max(img.width, img.height));
       const c = document.createElement('canvas');
       c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
       c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
       URL.revokeObjectURL(url);
-      resolve(c.toDataURL('image/jpeg', 0.72));
+      let q = quality; let out = c.toDataURL('image/jpeg', q);
+      while (out.length * 0.75 > maxBytes && q > 0.4) { q -= 0.08; out = c.toDataURL('image/jpeg', q); }
+      resolve(out);
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That photo could not be opened. Try a JPEG or PNG.')); };
     img.src = url;
   });
 }
 
-function addPhotoSheet(today, done) {
-  sheet('Add a photo', (close) => {
-    const date = h('input', { type: 'date', value: today, max: today, 'aria-label': 'Photo date' });
-    const pose = h('select', { 'aria-label': 'Pose' }, [['front', 'Front'], ['side', 'Side'], ['back', 'Back']].map(([v, l]) => h('option', { value: v }, l)));
-    const file = h('input', { type: 'file', accept: 'image/*', 'aria-label': 'Choose a photo' });
+// ---------------------------------------------------------------- photos: sessions + compare
+const POSES = [['front', 'Front'], ['side', 'Side'], ['back', 'Back']];
+/** Photos grouped by date, newest first: [{ date, front, side, back }]. */
+const sessionsOf = (photos) => {
+  const by = new Map();
+  for (const ph of photos) { if (!by.has(ph.date)) by.set(ph.date, { date: ph.date }); const s = by.get(ph.date); if (!s[ph.pose]) s[ph.pose] = ph; }
+  return [...by.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
+};
+
+function photosSection(photos, today, run) {
+  const sessions = sessionsOf(photos);
+  return h('section', { class: 'section' },
+    h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Photos'), sessions.length >= 2 ? h('button', { class: 'btn small ghost', onclick: () => compareSheet(sessions) }, icon('compare', 18), 'Compare') : null),
+    sessions.length ? h('div', {}, sessions.slice(0, 6).map((s) => h('div', { class: 'psession' },
+      h('p', { class: 'meta' }, fmtDate(s.date, { day: 'numeric', month: 'long', year: 'numeric' })),
+      h('div', { class: 'photo-grid' }, POSES.map(([k, l]) => s[k]
+        ? h('button', { class: 'photo', 'aria-label': `${l} photo, ${fmtDate(s.date)}`, onclick: () => photoSheet(s[k], run) }, h('img', { src: `/api/photos/${s[k].id}`, alt: '', loading: 'lazy' }), h('span', {}, l))
+        : h('div', { class: 'photo empty-photo' }, h('span', {}, l)))))),
+      sessions.length > 6 ? h('p', { class: 'meta', style: 'padding:6px 0' }, `${sessions.length - 6} older sets kept for comparing.`) : null)
+      : h('p', { class: 'muted', style: 'margin:12px 0' }, 'Take a front, side and back photo every 2–4 weeks in the same spot and light. Compare them side by side here.'),
+    h('button', { class: 'add-row', onclick: () => addPhotosSheet(today, run) }, icon('camera', 22), 'Add progress photos'));
+}
+
+function compareSheet(sessions) {
+  sheet('Compare photos', () => {
+    let pose = 'front';
+    let a = sessions[sessions.length - 1].date; let b = sessions[0].date; // first vs latest
+    const view = h('div', { class: 'compare' });
+    const pick = (cur, onChange, label) => {
+      const sel = h('select', { 'aria-label': label }, sessions.map((s) => h('option', { value: s.date, selected: s.date === cur ? true : null }, fmtDate(s.date, { day: 'numeric', month: 'short', year: 'numeric' }))));
+      sel.addEventListener('change', () => { onChange(sel.value); draw(); });
+      return sel;
+    };
+    const side = (date, label, onChange) => {
+      const s = sessions.find((x) => x.date === date);
+      const ph = s?.[pose];
+      return h('figure', {}, ph ? h('img', { src: `/api/photos/${ph.id}`, alt: `${pose} photo, ${fmtDate(date)}` }) : h('div', { class: 'photo empty-photo', style: 'aspect-ratio:3/4' }, h('span', {}, `No ${pose} photo`)),
+        pick(date, onChange, label));
+    };
+    const days = () => Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
+    const note = h('p', { class: 'sub', style: 'margin-top:8px' });
+    const draw = () => {
+      view.replaceChildren(side(a, 'Before', (v) => { a = v; }), side(b, 'After', (v) => { b = v; }));
+      note.textContent = days() ? `${Math.abs(days())} days apart.` : '';
+    };
+    draw();
+    return h('div', {}, seg(POSES, pose, (v) => { pose = v; draw(); }, 'Pose'), view, note);
+  });
+}
+
+/** Front, side and back in one go: take them or pick them from the phone's photos. */
+function addPhotosSheet(today, done) {
+  sheet('Add progress photos', (close) => {
+    const shots = {};
+    const date = dateChip(today, { max: today, label: 'Photo date' });
+    const tile = (pose, label) => {
+      const img = h('img', { alt: '', class: 'shot-img', hidden: true });
+      const ph = h('span', { class: 'shot-ph' }, icon('camera', 26), h('small', {}, 'Add'));
+      const input = h('input', { type: 'file', accept: 'image/*', class: 'sr-only', 'aria-label': `${label} photo` });
+      input.addEventListener('change', async () => {
+        if (!input.files[0]) return;
+        try { shots[pose] = await shrink(input.files[0]); img.src = shots[pose]; img.hidden = false; ph.hidden = true; } catch (e) { toast(e.message, 'bad'); }
+      });
+      return h('label', { class: 'shot' }, input, img, ph, h('span', { class: 'shot-label' }, label));
+    };
     const go = h('button', { class: 'btn block', onclick: async () => {
-      if (!file.files[0]) { toast('Choose a photo first', 'bad'); return; }
-      go.disabled = true;
+      const poses = Object.keys(shots);
+      if (!poses.length) { toast('Add at least one photo', 'bad'); return; }
+      go.disabled = true; go.textContent = 'Saving…';
       try {
-        const image = await shrink(file.files[0]);
-        await api('POST', '/api/photos', { date: date.value, pose: pose.value, image });
-        close(); toast('Photo saved'); done();
-      } catch (e) { toast(e.message, 'bad'); go.disabled = false; }
-    } }, 'Save photo');
+        for (const pose of poses) await api('POST', '/api/photos', { date: date.value, pose, image: shots[pose] });
+        toast('Photos saved');
+        close(); done();
+      } catch (e) { toast(e.message, 'bad'); go.disabled = false; go.textContent = 'Save photos'; }
+    } }, 'Save photos');
     return h('div', { class: 'stack' },
-      h('p', { class: 'sub' }, 'Same light, same spot, relaxed stance, arms slightly out. Photos are private to you and the admin.'),
-      h('div', { class: 'grid2' }, field('Date', date), field('Pose', pose)), field('Photo', file), go);
+      h('p', { class: 'sub' }, 'Same spot, same light, relaxed stance, arms slightly out. Private to you and the admin.'),
+      h('div', { class: 'shots' }, POSES.map(([k, l]) => tile(k, l))),
+      field('Date', date),
+      go);
   });
 }
 
@@ -147,4 +212,22 @@ function photoSheet(ph, done) {
     h('button', { class: 'btn danger block', onclick: () => confirmSheet('Delete this photo?', 'It is removed for good.', 'Delete', async () => {
       try { await api('DELETE', `/api/photos/${ph.id}`); close(); toast('Photo deleted'); done(); } catch (e) { toast(e.message, 'bad'); }
     }, true) }, 'Delete photo')));
+}
+
+/** 64-bit average hash (8x8 greyscale) of an image data URL, as 16 hex chars. Flags re-used photos. */
+export function averageHash(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas'); c.width = 8; c.height = 8;
+      const g = c.getContext('2d'); g.drawImage(img, 0, 0, 8, 8);
+      const px = g.getImageData(0, 0, 8, 8).data;
+      const lum = []; for (let i = 0; i < 64; i++) lum.push(px[i * 4] * 0.299 + px[i * 4 + 1] * 0.587 + px[i * 4 + 2] * 0.114);
+      const avg = lum.reduce((a, b) => a + b, 0) / 64;
+      let hex = ''; for (let i = 0; i < 64; i += 4) hex += ((lum[i] > avg) << 3 | (lum[i + 1] > avg) << 2 | (lum[i + 2] > avg) << 1 | (lum[i + 3] > avg)).toString(16);
+      resolve(hex);
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
 }

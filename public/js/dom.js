@@ -1,6 +1,6 @@
 // Tiny DOM helper. Text is always inserted as text nodes, never as HTML.
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const SVG_TAGS = new Set(['svg', 'path', 'circle', 'line', 'rect', 'polyline', 'g', 'text']);
+const SVG_TAGS = new Set(['svg', 'path', 'circle', 'line', 'rect', 'polyline', 'g', 'text', 'defs', 'linearGradient', 'stop']);
 
 // Native replaceChildren/append turn null into the text "null". Views pass `cond ? node : null`
 // freely, so make both ignore empty values and flatten arrays. Every view imports this file.

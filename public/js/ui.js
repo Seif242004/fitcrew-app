@@ -1,4 +1,5 @@
 import { h } from './dom.js';
+import { shiftDate, fmtDate } from './state.js';
 import { api } from './api.js';
 
 const ICONS = {
@@ -12,7 +13,26 @@ const ICONS = {
   chevL: 'M15 5l-7 7 7 7',
   chevR: 'M9 5l7 7-7 7',
   check: 'M5 12l5 5 9-10',
+  swap: 'M7 4L4 7l3 3M4 7h13M17 20l3-3-3-3M20 17H7',
+  coach: 'M4 5h16v11H10l-4 4v-4H4z M8 10h.01 M12 10h.01 M16 10h.01',
+  drop: 'M12 3c3.5 4.2 6 7.6 6 11a6 6 0 0 1-12 0c0-3.4 2.5-6.8 6-11z',
+  send: 'M5 12h13M12 5l7 7-7 7',
+  bell: 'M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20a2 2 0 0 0 4 0',
+  spark: 'M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M6 18l2.5-2.5M15.5 8.5L18 6',
+  dots: 'M4 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0M10.5 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0M17 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0',
   trash: 'M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13',
+  camera: 'M4 8h3l2-3h6l2 3h3v11H4zM12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z',
+  play: 'M9 6.5v11l9-5.5z',
+  minus: 'M5 12h14',
+  info: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v5M12 8h.01',
+  clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2',
+  flame: 'M12 3c1 3.5 5 5.5 5 10a5 5 0 0 1-10 0c0-2.5 1.5-4 2.5-5.5.5 1.5 1.5 2.5 2.5 2.5C12 7.5 11.5 5 12 3z',
+  compare: 'M12 4v16M4 6h5v12H4zM15 6h5v12h-5z',
+  smile: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM8.5 14a4 4 0 0 0 7 0M9 9.5h.01M15 9.5h.01',
+  trophy: 'M8 4h8v5a4 4 0 0 1-8 0zM8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1-3 4M12 13v4M8 20h8M9.5 17h5',
+  chart: 'M4 20h16M7 16v-5M12 16V7M17 16v-8',
+  scale: 'M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM8.5 10a3.5 3.5 0 0 1 7 0zM12 10l1.5-2',
+  cloud: 'M7 18a4 4 0 0 1-.5-8 6 6 0 0 1 11.5 1.5A3.5 3.5 0 0 1 17.5 18z',
 };
 
 export const icon = (name, size = 24) =>
@@ -20,12 +40,15 @@ export const icon = (name, size = 24) =>
     h('path', { d: ICONS[name] }));
 
 let toastTimer;
-export function toast(msg, kind = '') {
+/** Toast with an optional action, e.g. toast('Breakfast logged', '', { label: 'Undo', run }). */
+export function toast(msg, kind = '', action = null) {
   const el = document.getElementById('toast');
-  el.textContent = msg;
+  el.replaceChildren(h('span', {}, msg));
+  if (action) el.append(h('button', { type: 'button', onclick: () => { el.className = 'toast'; action.run(); } }, action.label));
   el.className = `toast show ${kind}`;
+  el.setAttribute('role', kind === 'bad' ? 'alert' : 'status');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = 'toast'; }, 2800);
+  toastTimer = setTimeout(() => { el.className = 'toast'; }, action ? 5000 : 2600);
 }
 
 /** Bottom sheet. build(close) returns the content; returns close(). */
@@ -41,6 +64,10 @@ export function sheet(title, build) {
   dlg.showModal();
   return close;
 }
+
+// A sheet belongs to the screen it was opened on: close it when the route changes (back button,
+// tab bar, links inside the sheet).
+addEventListener('hashchange', () => document.querySelectorAll('dialog.sheet[open]').forEach((d) => d.close()));
 
 export function confirmSheet(title, message, confirmLabel, onConfirm, danger = false) {
   return sheet(title, (close) => h('div', { class: 'stack' },
@@ -128,4 +155,155 @@ export function foodPicker(onPick) {
   input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 180); });
   run();
   return h('div', { class: 'stack' }, input, list);
+}
+
+/**
+ * Seven-day strip: the last 7 days, or a week centred on an older date. Future days disabled.
+ * dots: Map(date -> 'hit' | 'miss') for an optional status dot under each day.
+ */
+export function weekStrip({ date, today, onPick, dots = new Map(), labelFor = () => '' }) {
+  const end = shiftDate(date, 3) > today ? today : shiftDate(date, 3);
+  const days = Array.from({ length: 7 }, (_, i) => shiftDate(end, i - 6));
+  return h('div', { class: 'week', role: 'group', 'aria-label': 'Choose a day' }, days.map((dt) =>
+    h('button', {
+      class: `day ${dt === today ? 'today' : ''}`, 'aria-pressed': String(dt === date), disabled: dt > today ? true : null,
+      'aria-label': `${fmtDate(dt, { weekday: 'long', day: 'numeric', month: 'long' })}${labelFor(dt)}`,
+      onclick: () => onPick(dt),
+    }, h('span', { class: 'dw' }, fmtDate(dt, { weekday: 'narrow' })), h('span', { class: 'dn' }, Number(dt.slice(8))), h('span', { class: `dot ${dots.get(dt) ?? ''}` }))));
+}
+
+/** Per-device memory for small conveniences (dismissed cards, shown celebrations). Never throws. */
+export const local = {
+  get: (k) => { try { return localStorage.getItem(`fc.${k}`); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(`fc.${k}`, v); } catch { /* private mode: forget */ } },
+};
+
+/**
+ * Full-screen reward moment: a burst of colour, a big icon, a headline and one line.
+ * Tap anywhere (or wait ~3 s) to close. With reduced motion it is a calm card without the burst.
+ * opts: { icon, title, text, stat, kind: 'go' | 'gold' | 'pr' }
+ */
+export function celebrate({ icon: ic = 'check', title, text = '', stat = null, kind = 'go' }) {
+  document.querySelector('.celebrate')?.remove();
+  const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const colours = ['var(--go)', 'var(--carbs)', 'var(--protein)', 'var(--fat)'];
+  // 18 confetti pieces flung outwards at fixed angles with a little randomness.
+  const burst = calm ? null : h('div', { class: 'burst', 'aria-hidden': 'true' }, Array.from({ length: 18 }, (_, i) => {
+    const a = (i / 18) * Math.PI * 2 + Math.random() * 0.3;
+    const d = 110 + Math.random() * 70;
+    return h('i', { style: `--x:${Math.cos(a) * d}px;--y:${Math.sin(a) * d}px;--r:${Math.round(Math.random() * 360)}deg;background:${colours[i % 4]};animation-delay:${Math.random() * 80}ms` });
+  }));
+  const el = h('div', { class: `celebrate k-${kind}`, role: 'status', 'aria-live': 'assertive' },
+    h('div', { class: 'cel-card' },
+      burst,
+      h('div', { class: 'cel-icon' }, icon(ic, 40)),
+      h('h2', {}, title),
+      stat ? h('div', { class: 'cel-stat' }, stat) : null,
+      text ? h('p', {}, text) : null,
+      h('span', { class: 'meta' }, 'Tap to close')));
+  const close = () => { el.classList.add('out'); setTimeout(() => el.remove(), 200); };
+  el.addEventListener('click', close);
+  document.body.append(el);
+  if (navigator.vibrate) navigator.vibrate(calm ? 20 : [18, 40, 28]);
+  setTimeout(close, 3200);
+  return close;
+}
+
+/**
+ * Date picker that looks like a chip ("Today ▾", "Thu 2 Oct ▾") instead of a truncated date box.
+ * The real <input type="date"> sits invisibly on top, so the phone's own picker opens on tap.
+ * The returned element has .value like an input.
+ */
+export function dateChip(value, { max, label = 'Date' } = {}) {
+  const input = h('input', { type: 'date', value, max, 'aria-label': label });
+  const text = h('span', {});
+  const draw = () => { text.textContent = input.value === localToday() ? 'Today' : input.value === shiftDate(localToday(), -1) ? 'Yesterday' : fmtDate(input.value, { weekday: 'short', day: 'numeric', month: 'short' }); };
+  input.addEventListener('change', () => { if (!input.value) input.value = value; draw(); });
+  draw();
+  const wrap = h('div', { class: 'datechip' }, text, h('span', { class: 'caret', 'aria-hidden': 'true' }, '▾'), input);
+  Object.defineProperty(wrap, 'value', { get: () => input.value, set: (v) => { input.value = v; draw(); } });
+  return wrap;
+}
+const localToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+
+// ---------- amounts: "3 eggs", "1½ cups", "120 g" ----------
+const nice = (n) => { const r = Math.round(n * 2) / 2; return Number.isInteger(r) ? String(r) : r < 1 ? '½' : `${Math.floor(r)}½`; };
+/** "3 eggs", "1½ cups", "120 g", "70 g dry". */
+export function qtyLabel(u, qty) {
+  if (u.grams) return `${Math.round(qty)} ${u.key === 'dry' ? 'g dry' : 'g'}`;
+  return `${nice(qty)} ${qty <= 1 ? u.name : u.plural}`;
+}
+
+/**
+ * Amount picker: log food the way people say it. A unit switch (eggs / g, cups / g dry / g), a big
+ * − value + stepper you can also type into, quick portions of the planned amount for weighed foods,
+ * and the calories updating live.
+ *   units    [{ key, name, plural, g, step, grams? }] from the server (natural units first)
+ *   grams    starting amount in grams as eaten (the planned amount, or 0)
+ *   planned  planned grams, enables the quick chips ("½", "As planned", "1½")
+ *   per100   { kcal, p, c, f } per 100 g for the live preview
+ *   onChange({ unit, qty, grams }) after every change
+ * Returns { el, value() } where value() is { unit, qty, grams }.
+ */
+export function amountPicker({ units, grams = 0, planned = null, per100 = null, onChange = () => {} }) {
+  const list = units?.length ? units : [{ key: 'g', name: 'g', plural: 'g', g: 1, step: 5, grams: true }];
+  // Start in the unit that states the starting amount exactly: 4 eggs, 2 cups... else grams dry
+  // (how rice and pasta are planned), else grams.
+  const exact = (u) => { const q = grams / u.g; return grams > 0 && !u.grams && Math.abs(q - Math.round(q / u.step) * u.step) <= 0.03 * q; };
+  // With nothing planned (adding a food), start in its natural unit: 1 piece, 1 plate, 1 cup.
+  let unit = grams > 0 ? (list.find(exact) ?? list.find((u) => u.key === 'dry') ?? list.find((u) => u.key === 'g') ?? list[0]) : list[0];
+  const snap = (q, u) => Math.max(0, Math.round(q / u.step) * u.step);
+  let qty = grams > 0 ? (unit.grams ? Math.round(grams / unit.g) : snap(grams / unit.g, unit)) : (unit.grams ? 100 : 1);
+
+  const input = h('input', { class: 'amt-input', type: 'number', inputmode: 'decimal', step: 'any', min: 0, 'aria-label': 'Amount' });
+  const unitName = h('span', { class: 'amt-unit' });
+  const preview = h('p', { class: 'amt-preview', 'aria-live': 'polite' });
+  const unitsRow = list.length > 1 ? h('div', { class: 'amt-units', role: 'radiogroup', 'aria-label': 'Measure in' }) : null;
+  const quick = planned ? h('div', { class: 'amt-quick', role: 'group', 'aria-label': 'Quick amounts' }) : null;
+  const gramsOf = () => Math.round(qty * unit.g * 10) / 10;
+
+  const draw = (fromTyping = false) => {
+    if (!fromTyping) input.value = unit.grams ? String(Math.round(qty)) : String(qty);
+    unitName.textContent = unit.grams ? (unit.key === 'dry' ? 'g dry' : 'g') : (qty <= 1 ? unit.name : unit.plural);
+    const g = gramsOf();
+    const m = per100 ? (k) => Math.round(((per100[k] ?? 0) * g) / (k === 'kcal' ? 100 : 10)) / (k === 'kcal' ? 1 : 10) : null;
+    preview.replaceChildren(
+      unit.grams && unit.key === 'g' ? null : h('span', {}, `${Math.round(g)} g`),
+      m ? h('span', {}, h('b', {}, m('kcal').toLocaleString('en-US')), ' kcal') : null,
+      m ? h('span', {}, `P ${m('p')} · C ${m('c')} · F ${m('f')}`) : null);
+    if (unitsRow) unitsRow.replaceChildren(...list.map((u) => h('button', {
+      type: 'button', class: 'chip', role: 'radio', 'aria-checked': String(u === unit), 'aria-pressed': String(u === unit),
+      onclick: () => { const g0 = gramsOf(); unit = u; qty = u.grams ? Math.round(g0 / u.g) : snap(g0 / u.g, u) || u.step; draw(); },
+    }, u.grams ? (u.key === 'dry' ? 'g dry' : 'grams') : u.plural)));
+    if (quick) {
+      // Portions of the plan in the current unit. With whole units (eggs) several fractions round
+      // to the same count: keep one chip per amount, "As planned" winning its own.
+      const toQ = (k) => (unit.grams ? Math.round((planned * k) / unit.g) : snap((planned * k) / unit.g, unit));
+      const planQ = toQ(1);
+      const seen = new Set([planQ]);
+      const chips = [[0.5, '½'], [0.75, '¾'], [1, 'As planned'], [1.5, '1½×'], [2, '2×']].filter(([k]) => {
+        if (k === 1) return true;
+        const q = toQ(k);
+        if (q <= 0 || seen.has(q)) return false;
+        seen.add(q); return true;
+      });
+      quick.replaceChildren(...chips.map(([k, label]) => {
+        const q = toQ(k);
+        return h('button', { type: 'button', class: 'chip', 'aria-pressed': String(Math.abs(q - qty) < 1e-9), onclick: () => { qty = q; draw(); } }, label);
+      }));
+    }
+    onChange({ unit: unit.key, qty, grams: gramsOf(), label: qtyLabel(unit, qty) });
+  };
+  const bump = (d) => { qty = Math.max(0, Math.round((qty + d * (unit.grams ? (unit.key === 'g' ? 10 : 5) : unit.step)) * 100) / 100); draw(); };
+  input.addEventListener('input', () => { const v = Number(input.value); if (Number.isFinite(v) && v >= 0) { qty = v; draw(true); } });
+
+  const el = h('div', { class: 'amt' },
+    unitsRow,
+    h('div', { class: 'amt-step' },
+      h('button', { type: 'button', class: 'amt-btn', 'aria-label': 'Less', onclick: () => bump(-1) }, icon('minus', 22)),
+      h('label', { class: 'amt-val' }, input, unitName),
+      h('button', { type: 'button', class: 'amt-btn', 'aria-label': 'More', onclick: () => bump(1) }, icon('plus', 22))),
+    quick, preview);
+  draw();
+  return { el, value: () => ({ unit: unit.key, qty, grams: gramsOf(), label: qtyLabel(unit, qty) }) };
 }

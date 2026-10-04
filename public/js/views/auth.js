@@ -4,6 +4,7 @@ import { plain } from '../shell.js';
 import { navigate } from '../router.js';
 import { field } from '../ui.js';
 import { loadMe } from '../session.js';
+import { showInstall, isStandalone } from '../install.js';
 
 const COPY = {
   login: { title: 'Sign in', lead: 'Your diet and training, in one place.', cta: 'Sign in', path: '/api/login' },
@@ -17,7 +18,9 @@ export function authView(mode) {
   const name = h('input', { type: 'text', autocomplete: 'name', required: true });
   const mail = h('input', { type: 'email', autocomplete: 'email', inputmode: 'email', required: true, autocapitalize: 'none' });
   const pass = h('input', { type: 'password', autocomplete: mode === 'login' ? 'current-password' : 'new-password', required: true, minlength: mode === 'login' ? null : 8 });
-  const code = h('input', { type: 'text', autocapitalize: 'characters', autocomplete: 'off', required: true });
+  // Invite links carry the code (#/register?code=ABC123): fill it in so the friend only types name, email, password.
+  const fromLink = new URLSearchParams(location.hash.split('?')[1] ?? '').get('code') ?? '';
+  const code = h('input', { type: 'text', autocapitalize: 'characters', autocomplete: 'off', required: true, value: fromLink });
   const btn = h('button', { class: 'btn block', type: 'submit' }, c.cta);
 
   const onSubmit = async (ev) => {
@@ -49,6 +52,7 @@ export function authView(mode) {
       err,
       btn),
     mode === 'login' ? h('p', { style: 'margin-top:22px' }, 'Have an invite code? ', h('a', { href: '#/register' }, 'Join here')) : null,
-    mode === 'register' ? h('p', { style: 'margin-top:22px' }, 'Already have an account? ', h('a', { href: '#/login' }, 'Sign in')) : null);
-  (mode === 'login' ? mail : mode === 'register' ? code : name).focus();
+    mode === 'register' ? h('p', { style: 'margin-top:22px' }, 'Already have an account? ', h('a', { href: '#/login' }, 'Sign in')) : null,
+    isStandalone() ? null : h('p', { style: 'margin-top:12px' }, h('button', { class: 'link', type: 'button', onclick: showInstall }, 'Add FitCrew to your home screen')));
+  (mode === 'login' ? mail : mode === 'register' && !fromLink ? code : name).focus();
 }

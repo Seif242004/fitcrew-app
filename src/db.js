@@ -1,6 +1,3 @@
-import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import path from 'node:path';
 import { FOODS } from './foods-seed.js';
 import { EXERCISES } from './workout.js';
 
@@ -13,11 +10,13 @@ CREATE TABLE IF NOT EXISTS users (
   pass_salt TEXT NOT NULL,
   pass_hash TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
+  private INTEGER NOT NULL DEFAULT 0, -- admin-only: invisible to every other member everywhere
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS invites (
   code TEXT PRIMARY KEY,
   note TEXT,
+  private INTEGER NOT NULL DEFAULT 0, -- the account it creates starts private
   created_by INTEGER REFERENCES users(id),
   used_by INTEGER REFERENCES users(id),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -155,6 +154,107 @@ CREATE TABLE IF NOT EXISTS photos (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS photos_user ON photos(user_id, date);
+CREATE TABLE IF NOT EXISTS coach_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user','assistant','system','event')),
+  kind TEXT NOT NULL DEFAULT 'chat',
+  content TEXT NOT NULL,
+  data TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  read_at TEXT
+);
+CREATE INDEX IF NOT EXISTS coach_user ON coach_messages(user_id, id);
+CREATE TABLE IF NOT EXISTS push_subs (
+  endpoint TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS day_swaps (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  food_id TEXT NOT NULL,
+  grams REAL NOT NULL,
+  PRIMARY KEY (user_id, date, ref)
+);
+-- "Just today" whole-meal swaps: the meal's items for one date (JSON, plan item shape).
+CREATE TABLE IF NOT EXISTS meal_swaps (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  meal_idx INTEGER NOT NULL,
+  tpl TEXT,
+  title TEXT,
+  items TEXT NOT NULL,
+  PRIMARY KEY (user_id, date, meal_idx)
+);
+CREATE TABLE IF NOT EXISTS water_logs (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  ml INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, date)
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS jobs_run (
+  job TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  day TEXT NOT NULL,
+  at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (job, user_id, day)
+);
+CREATE TABLE IF NOT EXISTS checkins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected')),
+  image BLOB,
+  hash TEXT,
+  ahash TEXT,
+  verdict TEXT,
+  reviewed_by INTEGER,
+  reviewed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, date)
+);
+CREATE INDEX IF NOT EXISTS checkins_status ON checkins(status, date);
+CREATE TABLE IF NOT EXISTS body_assessments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  body_fat_pct REAL,
+  data TEXT NOT NULL,
+  applied INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS assess_user ON body_assessments(user_id, id);
+CREATE TABLE IF NOT EXISTS activity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  key TEXT NOT NULL,
+  text TEXT NOT NULL,
+  data TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, key)
+);
+CREATE INDEX IF NOT EXISTS activity_time ON activity(created_at);
+CREATE TABLE IF NOT EXISTS reactions (
+  activity_id INTEGER NOT NULL REFERENCES activity(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  PRIMARY KEY (activity_id, user_id, kind)
+);
+CREATE TABLE IF NOT EXISTS competition_results (
+  month TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  prize TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   actor_id INTEGER REFERENCES users(id),
@@ -165,39 +265,106 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 `;
 
+/**
+ * Local / Node: open a SQLite file. node:sqlite, fs and path are loaded lazily so this module
+ * also runs on Cloudflare, where the database is a Durable Object's SQLite (see worker/).
+ */
 export function openDb(file = process.env.FITCREW_DB ?? 'data/fitcrew.db') {
-  if (file !== ':memory:') mkdirSync(path.dirname(file), { recursive: true });
+  const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+  if (file !== ':memory:') {
+    const { mkdirSync } = process.getBuiltinModule('node:fs');
+    const path = process.getBuiltinModule('node:path');
+    mkdirSync(path.dirname(file), { recursive: true });
+  }
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+  return initDb(db);
+}
+
+// Bump when seed data changes; seeding then runs once instead of on every start (on Cloudflare
+// every cold start would otherwise rewrite ~200 rows).
+const SEED_VERSION = `${FOODS.reduce((a, f) => a + f.roles.join().length, 0)}:${FOODS.length}:${FOODS.reduce((a, f) => a + f.kcal + f.p + (f.portion?.[1] ?? 0) + (f.raw ?? 0), 0).toFixed(1)}:${EXERCISES.length}:${EXERCISES.reduce((a, e) => a + e.name.length + e.notes.length + (e.video ?? '').length, 0)}`;
+
+/** Schema, migrations and seed data on any SQLite with prepare/exec (node:sqlite or the DO adapter). */
+export function initDb(db) {
   db.exec(SCHEMA);
-  seedFoods(db);
-  seedExercises(db);
+  migrate(db);
+  const seeded = db.prepare("SELECT value FROM settings WHERE key = 'seedVersion'").get()?.value;
+  if (seeded !== JSON.stringify(SEED_VERSION)) {
+    seedFoods(db);
+    seedExercises(db);
+    setSetting(db, 'seedVersion', SEED_VERSION);
+  }
   return db;
 }
 
+// Seeded exercises are upserted (names, cues and demo videos improve over time) unless the admin
+// made the exercise or edited it by hand.
 function seedExercises(db) {
-  const ins = db.prepare('INSERT OR IGNORE INTO exercises (id,name,muscle,equip,pattern,inc,timed,notes,custom) VALUES (?,?,?,?,?,?,?,?,0)');
-  for (const e of EXERCISES) ins.run(e.id, e.name, e.muscle, e.equip, e.pattern, e.inc, e.timed ? 1 : 0, e.notes);
+  const up = db.prepare(`INSERT INTO exercises (id,name,muscle,equip,pattern,inc,timed,notes,video,custom) VALUES (?,?,?,?,?,?,?,?,?,0)
+    ON CONFLICT(id) DO UPDATE SET name=excluded.name, muscle=excluded.muscle, equip=excluded.equip, pattern=excluded.pattern, inc=excluded.inc,
+      timed=excluded.timed, notes=excluded.notes, video=excluded.video
+    WHERE exercises.custom = 0 AND exercises.edited = 0`);
+  for (const e of EXERCISES) up.run(e.id, e.name, e.muscle, e.equip, e.pattern, e.inc, e.timed ? 1 : 0, e.notes, e.video ?? '');
 }
 
 export const loadExercises = (db, { includeInactive = false } = {}) =>
   db.prepare(`SELECT * FROM exercises ${includeInactive ? '' : 'WHERE active = 1'} ORDER BY name`).all()
-    .map((r) => ({ id: r.id, name: r.name, muscle: r.muscle, equip: r.equip, pattern: r.pattern, inc: r.inc, timed: Boolean(r.timed), notes: r.notes, custom: Boolean(r.custom) }));
+    .map((r) => ({ id: r.id, name: r.name, muscle: r.muscle, equip: r.equip, pattern: r.pattern, inc: r.inc, timed: Boolean(r.timed), notes: r.notes, video: r.video ?? '', custom: Boolean(r.custom) }));
 
-function seedFoods(db) {
-  const ins = db.prepare(
-    'INSERT OR IGNORE INTO foods (id,name,cat,kcal,p,c,f,roles,tags,veg,step,max,unit,custom) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)',
-  );
-  for (const f of FOODS) {
-    ins.run(f.id, f.name, f.cat, f.kcal, f.p, f.c, f.f, JSON.stringify(f.roles), JSON.stringify(f.tags), f.veg ? 1 : 0, f.step, f.max, f.unit ? JSON.stringify(f.unit) : null);
-  }
+/** Additive column migrations for databases created by older versions. */
+function migrate(db) {
+  const cols = new Set(db.prepare('PRAGMA table_info(foods)').all().map((c) => c.name));
+  const add = (col, def) => { if (!cols.has(col)) db.exec(`ALTER TABLE foods ADD COLUMN ${col} ${def}`); };
+  add('ar', "TEXT NOT NULL DEFAULT ''");
+  add('portion', 'TEXT');
+  add('est', 'INTEGER NOT NULL DEFAULT 0');
+  add('edited', 'INTEGER NOT NULL DEFAULT 0'); // set when the admin changes a seeded food
+  add('raw', 'REAL'); // cooked weight / dry weight
+  const ecols = new Set(db.prepare('PRAGMA table_info(exercises)').all().map((c) => c.name));
+  if (!ecols.has('video')) db.exec("ALTER TABLE exercises ADD COLUMN video TEXT NOT NULL DEFAULT ''");
+  if (!ecols.has('edited')) db.exec('ALTER TABLE exercises ADD COLUMN edited INTEGER NOT NULL DEFAULT 0');
+  // Private members (admin-only visibility) and private invites.
+  const ucols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+  if (!ucols.has('private')) db.exec('ALTER TABLE users ADD COLUMN private INTEGER NOT NULL DEFAULT 0');
+  // How a log was entered ("3 eggs", "1½ cups"), so it reads back the way the person said it.
+  const lcols = new Set(db.prepare('PRAGMA table_info(logs)').all().map((c) => c.name));
+  if (!lcols.has('amount')) db.exec('ALTER TABLE logs ADD COLUMN amount TEXT');
+  const icols = new Set(db.prepare('PRAGMA table_info(invites)').all().map((c) => c.name));
+  if (!icols.has('private')) db.exec('ALTER TABLE invites ADD COLUMN private INTEGER NOT NULL DEFAULT 0');
 }
+
+// Seeded foods are upserted so corrections reach existing databases, except foods the admin
+// created (custom) or edited by hand (edited), which are never overwritten.
+function seedFoods(db) {
+  const up = db.prepare(`INSERT INTO foods (id,name,ar,cat,kcal,p,c,f,roles,tags,veg,step,max,unit,portion,est,raw,custom)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+    ON CONFLICT(id) DO UPDATE SET name=excluded.name, ar=excluded.ar, cat=excluded.cat, kcal=excluded.kcal, p=excluded.p, c=excluded.c, f=excluded.f,
+      roles=excluded.roles, tags=excluded.tags, veg=excluded.veg, step=excluded.step, max=excluded.max, unit=excluded.unit, portion=excluded.portion, est=excluded.est, raw=excluded.raw
+    WHERE foods.custom = 0 AND foods.edited = 0`);
+  db.exec('BEGIN');
+  try {
+    for (const f of FOODS) {
+      up.run(f.id, f.name, f.ar ?? '', f.cat, f.kcal, f.p, f.c, f.f, JSON.stringify(f.roles), JSON.stringify(f.tags), f.veg ? 1 : 0, f.step, f.max,
+        f.unit ? JSON.stringify(f.unit) : null, f.portion ? JSON.stringify(f.portion) : null, f.est ? 1 : 0, f.raw ?? null);
+    }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+
+export const getSetting = (db, key, fallback = null) => {
+  const r = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return r ? JSON.parse(r.value) : fallback;
+};
+export const setSetting = (db, key, value) =>
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value));
 
 export function rowToFood(r) {
   return {
     id: r.id, name: r.name, cat: r.cat, kcal: r.kcal, p: r.p, c: r.c, f: r.f,
     roles: JSON.parse(r.roles), tags: JSON.parse(r.tags), veg: Boolean(r.veg),
     step: r.step, max: r.max, unit: r.unit ? JSON.parse(r.unit) : null, custom: Boolean(r.custom),
+    ar: r.ar ?? '', portion: r.portion ? JSON.parse(r.portion) : null, est: Boolean(r.est), raw: r.raw ?? null,
   };
 }
 

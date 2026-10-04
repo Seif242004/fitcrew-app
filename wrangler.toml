@@ -1,0 +1,39 @@
+# FitCrew on Cloudflare (free plan, no card needed).
+# Deploy: run deploy.cmd on Windows (or `npx wrangler deploy` anywhere).
+name = "fitcrew"
+main = "worker/index.js"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# The browser app: served from Cloudflare's CDN. Unknown paths serve index.html.
+[assets]
+directory = "public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+# Copies the shared calorie calculator into the static files before every build.
+[build]
+command = "node scripts/build-assets.js"
+
+# The crew's database: one SQLite Durable Object.
+[[durable_objects.bindings]]
+name = "DB"
+class_name = "FitCrewDB"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FitCrewDB"]
+
+# Daily check-ins and reminders: checked every 10 minutes.
+[triggers]
+crons = ["*/10 * * * *"]
+
+[vars]
+FITCREW_FORCE_HTTPS = "1"
+FITCREW_AI_BASE_URL = "https://integrate.api.nvidia.com/v1"
+FITCREW_AI_MODEL = "openai/gpt-oss-20b"
+# FITCREW_AI_KEY is a secret: `npx wrangler secret put FITCREW_AI_KEY` (deploy.cmd asks for it).
+
+[observability]
+enabled = true

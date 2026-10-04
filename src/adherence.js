@@ -3,8 +3,9 @@
 //   20 protein at or above 90% of target (fades to 0 at 60%)
 //   20 planned items eaten, adjusted or swapped
 //   10 logged on the same day
-//   30 planned workout completed (rest day or no workout plan = full marks;
-//      until the workout module is attached, pass workout = null and the rest is rescaled)
+//   30 training on a planned day: 15 for an approved gym check-in (attendance photo)
+//      + 15 x the share of planned sets ticked off. Rest days earn the full 30 when the
+//      day is logged. No workout plan: pass workout = null and the rest is rescaled.
 // Days with nothing logged score 0, so honest logging is the only way to rank well.
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -24,9 +25,8 @@ export function dayScore({ targets, consumed, itemsTotal, itemsDone, loggedSameD
   if (workout === null) {
     total = ((parts.calories + parts.protein + parts.meals + parts.logging) / 70) * 100;
   } else {
-    parts.workout = !workout.planned ? 30 : workout.done ? 30 : 0;
-    // A rest day with nothing logged must not earn free points.
-    if (!anything && !workout.done) parts.workout = 0;
+    if (!workout.planned) parts.workout = anything ? 30 : 0; // rest day: no free points for an empty day
+    else parts.workout = (workout.checkin === 'approved' ? 15 : 0) + 15 * clamp(workout.completion ?? (workout.done ? 1 : 0), 0, 1);
     total = parts.calories + parts.protein + parts.meals + parts.logging + parts.workout;
   }
   return { total: Math.round(total), parts: Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, Math.round(v * 10) / 10])) };

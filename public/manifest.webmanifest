@@ -1,16 +1,23 @@
 {
+  "id": "/",
   "name": "FitCrew",
   "short_name": "FitCrew",
-  "description": "Private diet and workout tracker",
-  "start_url": "/",
+  "description": "Your crew's diet plans, training and AI coach",
+  "lang": "en",
+  "start_url": "/#/today",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#DADEE2",
-  "theme_color": "#DADEE2",
+  "background_color": "#f2f3f5",
+  "theme_color": "#f2f3f5",
+  "categories": ["health", "fitness", "food"],
   "icons": [
     { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Log food with the coach", "short_name": "Log food", "url": "/#/coach", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Today", "short_name": "Today", "url": "/#/today", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
   ]
 }
