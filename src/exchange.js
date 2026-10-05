@@ -28,6 +28,9 @@ export function exchangeGroup(food) {
   const cShare = (food.c * 4) / kcal;
   const roles = food.roles ?? [];
   if (isBreakfastLegume(food)) return 'protein'; // ful and taameya sit with eggs and cheese, not bread
+  // Everyday foods with no meal role: meat, fish and eggs are protein however they are cooked
+  // (fried eggs are fattier, but they replace boiled eggs, not olive oil).
+  if (!roles.length && food.cat === 'protein') return 'protein';
   // Role first, like a coach's table: eggs, kofta and mackerel are protein even though fatty.
   if (roles.some((r) => r === 'mainProtein' || r === 'bfProtein' || r === 'boost') && pShare >= 0.25) return 'protein';
   if (roles.some((r) => r === 'carb' || r === 'bfCarb' || r === 'vegMain') && cShare >= 0.35) return 'carb';
@@ -104,7 +107,13 @@ export function alternatives(from, grams, pool, { limit = 40 } = {}) {
 export function describeAmount(food, grams) {
   if (food.unit?.g) {
     const u = unitsFor(food)[0];
-    return formatQty(u, grams / food.unit.g);
+    const n = grams / food.unit.g;
+    const r = Math.round(n / u.step) * u.step;
+    // A count people would say (2 eggs, 1½ loaves). Anything in between reads in grams with the
+    // count as a hint ("100 g · about 1 loaf"), so 100 g of bread is never shown as "1 loaves".
+    if (r >= u.step && Math.abs(n - r) / r <= 0.08) return formatQty(u, r);
+    const g = Math.round(grams);
+    return r >= u.step && Math.abs(n - r) / r <= 0.25 ? `${g} g (about ${formatQty(u, r)})` : `${g} g`;
   }
   if (food.raw) return `${Math.round(grams / food.raw / 5) * 5} g dry (≈ ${grams} g cooked)`;
   return `${grams} g`;

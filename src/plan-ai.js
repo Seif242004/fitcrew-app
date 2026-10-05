@@ -21,7 +21,17 @@ import { generatePlan, planContext } from './plan.js';
 // Kimi K2.6 / Mistral Large / Nemotron Ultra are not enabled for free accounts (404 "Not found for
 // account"); GLM 5.3, DeepSeek V4.1 Flash and Kimi K3 were over 30 s. Admin can re-run the benchmark.
 export const DEFAULT_MODEL = 'openai/gpt-oss-20b';
-export const FALLBACK_MODELS = ['openai/gpt-oss-20b', 'moonshotai/kimi-k3', 'deepseek-ai/deepseek-v4.1-flash', 'z-ai/glm-5.3'];
+// NVIDIA's featured free endpoints (Oct 2026): Kimi K3, DeepSeek V4 Pro, Nemotron 3.5 Lightning
+// (30B, 3B active: fast) and Nemotron 3 Ultra (550B, 55B active: strongest). A missing ID is skipped.
+// Benchmark on the crew's account (5 Oct 2026, crew breakfast report): gpt-oss-20b 8.2 s correct,
+// Nemotron 3 Ultra 20.4 s correct, every other model over 30 s. So Ultra is the first backup.
+export const FALLBACK_MODELS = ['openai/gpt-oss-20b', 'nvidia/nemotron-3-ultra-550b-a55b', 'nvidia/nemotron-3.5-lightning-30b-a3b', 'deepseek-ai/deepseek-v4-pro-0813', 'moonshotai/kimi-k3', 'deepseek-ai/deepseek-v4.1-flash', 'z-ai/glm-5.3'];
+
+/**
+ * Benchmark order: the models most worth trying first. Patterns, because NVIDIA renames builds
+ * (deepseek-v4-pro-0813 -> a newer date). Anything else that fits BENCH_FAMILIES follows.
+ */
+export const BENCH_PRIORITY = [/nemotron-3\.5-lightning/i, /deepseek-v4-pro/i, /kimi-k3/i, /nemotron-3-ultra/i, /gpt-oss-120b/i, /gpt-oss-20b/i, /deepseek-v4\.1-flash/i, /glm-5\.3/i, /qwen3/i];
 
 export function aiConfig(env = process.env) {
   const key = env.FITCREW_AI_KEY?.trim();

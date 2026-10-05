@@ -1,4 +1,7 @@
 import { FOODS } from './foods-seed.js';
+import { OFFPLAN_FOODS } from './offplan-foods.js';
+// Diet foods (plans, swaps) and off-plan foods (logging only) share the foods table; `offplan` tells them apart.
+const ALL_FOODS = [...FOODS, ...OFFPLAN_FOODS];
 import { EXERCISES } from './workout.js';
 
 const SCHEMA = `
@@ -255,6 +258,28 @@ CREATE TABLE IF NOT EXISTS reactions (
   kind TEXT NOT NULL,
   PRIMARY KEY (activity_id, user_id, kind)
 );
+-- One-tap rest / training day switch (api-train.js sessionFor): kind 'rest' turns a planned
+-- session day into a rest day; kind 'train' turns a rest day into a training day doing the
+-- session planned on that weekday (pulled forward from later in the week).
+CREATE TABLE IF NOT EXISTS day_overrides (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('rest','train')),
+  weekday INTEGER,
+  PRIMARY KEY (user_id, date)
+);
+-- Adaptive weekly check-in (adaptive.js): one row per person per check-in Friday.
+-- status: open (waiting for an answer) | accepted | kept | dismissed. data: the check-in numbers.
+CREATE TABLE IF NOT EXISTS diet_checkins (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  week TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  data TEXT NOT NULL,
+  result TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  decided_at TEXT,
+  PRIMARY KEY (user_id, week)
+);
 CREATE TABLE IF NOT EXISTS competition_results (
   month TEXT PRIMARY KEY,
   data TEXT NOT NULL,
@@ -289,7 +314,7 @@ export function openDb(file = process.env.FITCREW_DB ?? 'data/fitcrew.db') {
 
 // Bump when seed data changes; seeding then runs once instead of on every start (on Cloudflare
 // every cold start would otherwise rewrite ~200 rows).
-const SEED_VERSION = `${FOODS.reduce((a, f) => a + f.roles.join().length, 0)}:${FOODS.length}:${FOODS.reduce((a, f) => a + f.kcal + f.p + (f.portion?.[1] ?? 0) + (f.raw ?? 0), 0).toFixed(1)}:${EXERCISES.length}:${EXERCISES.reduce((a, e) => a + e.name.length + e.notes.length + (e.video ?? '').length, 0)}`;
+const SEED_VERSION = `${ALL_FOODS.reduce((a, f) => a + f.roles.join().length, 0)}:${ALL_FOODS.length}:${ALL_FOODS.reduce((a, f) => a + f.kcal + f.p + (f.portion?.[1] ?? 0) + (f.raw ?? 0) + (f.unit?.g ?? 0), 0).toFixed(1)}:${EXERCISES.length}:${EXERCISES.reduce((a, e) => a + e.name.length + e.notes.length + (e.video ?? '').length, 0)}`;
 
 /** Schema, migrations and seed data on any SQLite with prepare/exec (node:sqlite or the DO adapter). */
 export function initDb(db) {
@@ -327,6 +352,7 @@ function migrate(db) {
   add('est', 'INTEGER NOT NULL DEFAULT 0');
   add('edited', 'INTEGER NOT NULL DEFAULT 0'); // set when the admin changes a seeded food
   add('raw', 'REAL'); // cooked weight / dry weight
+  add('offplan', 'INTEGER NOT NULL DEFAULT 0'); // off-plan food (pizza, sweets): logging only, never in plans
   const ecols = new Set(db.prepare('PRAGMA table_info(exercises)').all().map((c) => c.name));
   if (!ecols.has('video')) db.exec("ALTER TABLE exercises ADD COLUMN video TEXT NOT NULL DEFAULT ''");
   if (!ecols.has('edited')) db.exec('ALTER TABLE exercises ADD COLUMN edited INTEGER NOT NULL DEFAULT 0');
@@ -337,6 +363,9 @@ function migrate(db) {
   // How a log was entered ("3 eggs", "1½ cups"), so it reads back the way the person said it.
   const lcols = new Set(db.prepare('PRAGMA table_info(logs)').all().map((c) => c.name));
   if (!lcols.has('amount')) db.exec('ALTER TABLE logs ADD COLUMN amount TEXT');
+  // Which meal an extra food or drink belongs to (index into the day's meals); NULL = not placed.
+  // Plan items carry their meal in the ref ("day-meal-item"), so only extras use it.
+  if (!lcols.has('meal')) db.exec('ALTER TABLE logs ADD COLUMN meal INTEGER');
   const icols = new Set(db.prepare('PRAGMA table_info(invites)').all().map((c) => c.name));
   if (!icols.has('private')) db.exec('ALTER TABLE invites ADD COLUMN private INTEGER NOT NULL DEFAULT 0');
 }
@@ -344,16 +373,16 @@ function migrate(db) {
 // Seeded foods are upserted so corrections reach existing databases, except foods the admin
 // created (custom) or edited by hand (edited), which are never overwritten.
 function seedFoods(db) {
-  const up = db.prepare(`INSERT INTO foods (id,name,ar,cat,kcal,p,c,f,roles,tags,veg,step,max,unit,portion,est,raw,custom)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+  const up = db.prepare(`INSERT INTO foods (id,name,ar,cat,kcal,p,c,f,roles,tags,veg,step,max,unit,portion,est,raw,offplan,custom)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
     ON CONFLICT(id) DO UPDATE SET name=excluded.name, ar=excluded.ar, cat=excluded.cat, kcal=excluded.kcal, p=excluded.p, c=excluded.c, f=excluded.f,
-      roles=excluded.roles, tags=excluded.tags, veg=excluded.veg, step=excluded.step, max=excluded.max, unit=excluded.unit, portion=excluded.portion, est=excluded.est, raw=excluded.raw
+      roles=excluded.roles, tags=excluded.tags, veg=excluded.veg, step=excluded.step, max=excluded.max, unit=excluded.unit, portion=excluded.portion, est=excluded.est, raw=excluded.raw, offplan=excluded.offplan
     WHERE foods.custom = 0 AND foods.edited = 0`);
   db.exec('BEGIN');
   try {
-    for (const f of FOODS) {
+    for (const f of ALL_FOODS) {
       up.run(f.id, f.name, f.ar ?? '', f.cat, f.kcal, f.p, f.c, f.f, JSON.stringify(f.roles), JSON.stringify(f.tags), f.veg ? 1 : 0, f.step, f.max,
-        f.unit ? JSON.stringify(f.unit) : null, f.portion ? JSON.stringify(f.portion) : null, f.est ? 1 : 0, f.raw ?? null);
+        f.unit ? JSON.stringify(f.unit) : null, f.portion ? JSON.stringify(f.portion) : null, f.est ? 1 : 0, f.raw ?? null, f.offplan ? 1 : 0);
     }
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -371,9 +400,15 @@ export function rowToFood(r) {
     id: r.id, name: r.name, cat: r.cat, kcal: r.kcal, p: r.p, c: r.c, f: r.f,
     roles: JSON.parse(r.roles), tags: JSON.parse(r.tags), veg: Boolean(r.veg),
     step: r.step, max: r.max, unit: r.unit ? JSON.parse(r.unit) : null, custom: Boolean(r.custom),
-    ar: r.ar ?? '', portion: r.portion ? JSON.parse(r.portion) : null, est: Boolean(r.est), raw: r.raw ?? null,
+    ar: r.ar ?? '', portion: r.portion ? JSON.parse(r.portion) : null, est: Boolean(r.est), raw: r.raw ?? null, offplan: Boolean(r.offplan),
   };
 }
 
-export const loadFoods = (db, { includeInactive = false } = {}) =>
-  db.prepare(`SELECT * FROM foods ${includeInactive ? '' : 'WHERE active = 1'} ORDER BY name`).all().map(rowToFood);
+/**
+ * Foods for plans and swaps by default: active diet foods only. Off-plan foods (pizza, sweets)
+ * are never returned unless asked for, so nothing that builds or changes a plan can pick them.
+ *   offplan: true          also include off-plan foods (food search and logging)
+ *   includeInactive: true  everything, for looking up foods by id (old logs, old plans)
+ */
+export const loadFoods = (db, { includeInactive = false, offplan = false } = {}) =>
+  db.prepare(`SELECT * FROM foods ${includeInactive ? '' : `WHERE active = 1${offplan ? '' : ' AND offplan = 0'}`} ORDER BY name`).all().map(rowToFood);

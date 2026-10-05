@@ -13,29 +13,11 @@ import { filterFoods } from './plan.js';
 import { EXCLUDE_GROUPS } from './foods-seed.js';
 import { describeAmount } from './exchange.js';
 import { unitsFor } from './measures.js';
+import { normalizeToolCalls } from './tool-calls.js';
 
-// ---------------------------------------------------------------- food search (Arabic + English)
-const AR_NORMAL = [[/[ً-ْـ]/g, ''], [/[أإآ]/g, 'ا'], [/ة/g, 'ه'], [/ى/g, 'ي'], [/ؤ/g, 'و'], [/ئ/g, 'ي']];
-export function norm(s) {
-  let t = String(s ?? '').toLowerCase().trim();
-  for (const [re, to] of AR_NORMAL) t = t.replace(re, to);
-  return t.replace(/[^\p{L}\p{N} ]/gu, ' ').replace(/\s+/g, ' ');
-}
-export function searchFoods(foods, query, limit = 8) {
-  const q = norm(query);
-  if (!q) return [];
-  const words = q.split(' ');
-  const scored = foods.map((f) => {
-    const hay = `${norm(f.name)} ${norm(f.ar)} ${norm(f.id.replace(/-/g, ' '))}`;
-    let score = 0;
-    if (hay.includes(q)) score += 10;
-    for (const w of words) if (w.length > 1 && hay.includes(w)) score += 3;
-    if (norm(f.name).startsWith(q) || norm(f.ar).startsWith(q)) score += 4;
-    return { f, score };
-  }).filter((x) => x.score > 0);
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit).map(({ f }) => f);
-}
+// Food search (Arabic + English, spellings, word order) lives in search.js, shared with the app.
+export { norm, searchFoods } from './search.js';
+import { searchFoods } from './search.js';
 
 // ---------------------------------------------------------------- tools
 const T = (name, description, properties = {}, required = []) => ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required } } });
@@ -46,11 +28,17 @@ export const TOOLS = [
   T('get_day', 'The person\'s plan and log for a date: meals with item refs, what is eaten, calories/macros vs targets, water, workout. Call this before changing anything about a day.', { date: { ...str, description: 'YYYY-MM-DD, default today' } }),
   T('search_foods', 'Find foods in the database by English or Arabic name. Always use this to get a foodId; never invent ids.', { query: str }, ['query']),
   T('mark_plan_items', 'Mark planned items as eaten or skipped (or clear them) by ref from get_day.', { refs: strs, status: { type: 'string', enum: ['eaten', 'skipped', 'clear'] }, date: str }, ['refs', 'status']),
-  T('log_food', 'Log something eaten that is not a planned item, from the database. Give grams, or qty + unit key from the food list (u = its own unit like egg/loaf/piece, m0/m1 = household measure like cup/plate, dry = grams weighed dry).', { foodId: str, grams: num, qty: num, unit: str, date: str }, ['foodId']),
+  T('log_foods', 'THE way to log what they ate or drank. One call per meal with every food and drink of that meal, exactly as they said it. The server matches planned items (marks them eaten, or adjusted / swapped when the amount or food differs), adds the rest to that meal, converts units and ignores repeats, so never log the same report twice and never also call mark_plan_items or log_food for these foods. Each item: foodId from the food list (or name if unsure; or name + kcal/protein/carbs/fat estimates for something not in the database), and qty + unit in the words they used (unit: egg, loaf, slice, piece, sachet, cup, glass, mug, tbsp, tsp, ml, g, "g dry"), or grams when they gave grams. A sandwich or dish they describe by its parts is logged as its parts.', {
+    meal: { type: 'string', description: 'Meal name from today\'s plan (breakfast, lunch, dinner, snack, pre-workout, post-workout...) or its index. Use the meal they said; if they did not say, the meal closest to the time they ate.' },
+    items: { type: 'array', items: { type: 'object', properties: { foodId: str, name: str, qty: num, unit: str, grams: num, kcal: num, protein: num, carbs: num, fat: num }, required: [] } },
+    date: str,
+  }, ['items']),
+  T('move_food', 'Move a food or drink they added (ref starting with extra:) into another meal, or to "none".', { ref: str, meal: str, date: str }, ['ref', 'meal']),
+  T('log_food', 'Older single-item logging. Prefer log_foods.', { foodId: str, grams: num, qty: num, unit: str, meal: str, date: str }, ['foodId']),
   T('ate_amount', 'They ate a planned item but a different amount ("I had 3 eggs, not 2"). qty + unit key (see log_food), or grams.', { ref: str, qty: num, unit: str, grams: num, date: str }, ['ref']),
   T('meal_options', 'Whole-meal alternatives for one meal of the day (same kind, same calories and macros, fits the rest of the day). meal = index from get_day.', { meal: num, date: str }, ['meal']),
   T('swap_meal', 'Replace a whole meal with one from meal_options (key). scope today / always / reset (put the planned meal back).', { meal: num, key: str, scope: { type: 'string', enum: ['today', 'always', 'reset'] }, date: str }, ['meal', 'scope']),
-  T('log_custom_food', 'Log something eaten that is not in the database, with your best estimate of its nutrition. Prefer search_foods first.', { name: str, kcal: num, protein: num, carbs: num, fat: num, date: str }, ['name', 'kcal']),
+  T('log_custom_food', 'Log something eaten that is not in the database, with your best estimate of its nutrition. Prefer log_foods (it takes estimates too).', { name: str, kcal: num, protein: num, carbs: num, fat: num, meal: str, date: str }, ['name', 'kcal']),
   T('list_alternatives', 'Equivalent swaps for a planned item (same protein/carbs/fat), already filtered by what the person does not eat.', { ref: str, date: str }, ['ref']),
   T('swap_item', 'Replace a planned item with an equivalent food. scope "today" changes only today; "always" changes the plan from now on. The equivalent amount is computed by the server.', { ref: str, foodId: str, scope: { type: 'string', enum: ['today', 'always'] }, date: str }, ['ref', 'foodId', 'scope']),
   T('update_food_preferences', `Change what the person eats. Groups: ${EXCLUDE_GROUPS.map(([k, l]) => `${k} (${l})`).join(', ')}. A new plan is made automatically when needed.`, {
@@ -64,6 +52,7 @@ export const TOOLS = [
   T('add_water', 'Add (or with a negative number remove) water in ml for today.', { ml: num, date: str }, ['ml']),
   T('get_progress', 'Day scores, streak and weight trend for the last N days.', { days: { type: 'integer', minimum: 3, maximum: 60 } }),
   T('get_workout', 'Training for a date: session name, warm-up, each exercise with prescription (sets x reps, RIR, rest, tempo), sets already ticked, the suggested weight x reps, cardio, the gym check-in status and the attendance week.', { date: str }),
+  T('set_training_day', 'Make a day a rest day or a training day (today or the next 6 days). type: rest | train | plan (back to the plan). For train on a rest day, weekday (0=Sunday..6=Saturday) picks which planned session to do; default is the next one this week.', { type: { type: 'string', enum: ['rest', 'train', 'plan'] }, date: str, weekday: { type: 'integer', minimum: 0, maximum: 6 } }, ['type']),
   T('get_training_plan', 'The whole weekly training plan: split, weekdays, every session with its exercises and prescriptions, cardio and notes.'),
   T('log_sets', 'Tick off sets of an exercise the person did, with the weight and reps of each set. Use exerciseId from get_workout. Set numbers continue after sets already logged unless setNo is given.', {
     exerciseId: str, date: str, sets: { type: 'array', items: { type: 'object', properties: { weightKg: num, reps: num, setNo: num }, required: ['reps'] } },
@@ -85,12 +74,16 @@ export const TOOLS = [
   T('get_profile', 'Everything about the person: body, goal, targets, training details, food preferences, body-fat source.'),
   T('get_plan', 'Their whole diet plan: every meal and item with amounts and how many swaps each has.'),
   T('get_leaderboard', 'The monthly points competition: this month\'s points (most points in the month wins the prize), days left, this week, streaks, gym attendance, past champions.'),
+  T('get_weekly_checkin', 'This week\'s adaptive check-in (Friday to Sunday): trend weight, weekly rate vs goal, average calories eaten, estimated maintenance, and the proposed calorie change with its reason, or why there is no change yet. Use when they ask about their weekly check-in, a plateau or whether to change calories.'),
+  T('answer_weekly_checkin', 'Answer this week\'s check-in for the person: accept (apply the proposed calorie change; the same plan is re-sized and reviewed), keep (keep the current plan) or dismiss (hide an on-track note). Only when they clearly ask for it.', { answer: { type: 'string', enum: ['accept', 'keep', 'dismiss'] } }, ['answer']),
   T('get_recap', 'The person\'s weekly recap: points, rank, 70+ days, gym attendance, best lift, PRs, weight change and the one thing to improve.'),
   T('get_feed', 'Recent crew activity: check-ins, PRs, finished sessions, 70+ days, streaks, monthly winners.'),
   T('get_body', 'Body data: weigh-ins, tape measurements, progress photo dates and poses (never the images).'),
   T('log_measurements', 'Record tape measurements in cm.', { waistCm: num, neckCm: num, hipCm: num, chestCm: num, armCm: num, thighCm: num, calfCm: num, date: str }),
   T('ask_admin', 'Send a message to the human admin. Use only for things you cannot do or must not decide (medical issues, injuries, disputes).', { message: str }, ['message']),
 ];
+
+const TOOL_NAMES = new Set(TOOLS.map((t) => t.function.name));
 
 // Compact day summary so the model sees refs without a wall of JSON.
 function summarizeDay(d) {
@@ -99,8 +92,10 @@ function summarizeDay(d) {
     date: d.date,
     targets: { kcal: d.targets.kcal, protein: d.targets.proteinG, carbs: d.targets.carbsG, fat: d.targets.fatG },
     eaten: d.consumed, score: d.score?.total, water: d.water,
-    meals: d.meals.map((m, mi) => ({ meal: mi, name: m.name, title: m.title, items: m.items.map((i) => ({ ref: i.key, food: i.name, foodId: i.foodId, grams: i.grams, label: i.label, kcal: i.kcal, p: i.p, status: i.log?.status ?? 'not logged', swappedFrom: i.swappedFrom })) })),
-    otherFood: d.extras.map((e) => ({ name: e.name, kcal: e.kcal })),
+    meals: d.meals.map((m, mi) => ({ meal: mi, name: m.name, title: m.title,
+      items: m.items.map((i) => ({ ref: i.key, food: i.name, foodId: i.foodId, amount: i.amount, kcal: i.kcal, p: i.p, status: i.log?.status ?? 'not logged', ...(i.log && i.log.status !== 'eaten' ? { ate: `${i.log.amount ?? ''} ${i.log.name ?? ''}`.trim() } : {}), swappedFrom: i.swappedFrom })),
+      added: (m.extras ?? []).map((e) => ({ ref: e.ref, food: e.name, amount: e.amount, kcal: e.kcal })) })),
+    notInAMeal: d.extras.map((e) => ({ ref: e.ref, food: e.name, amount: e.amount, kcal: e.kcal })),
   };
 }
 
@@ -110,9 +105,9 @@ const WEEKDAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday
 function summarizeWorkout(w) {
   if (!w.hasPlan && !w.blocks?.length) return { plan: 'none', pending: w.hasPending };
   const checkin = w.checkin ? w.checkin.status : 'not checked in';
-  if (w.restDay && !w.blocks.length) return { restDay: true, checkin, week: w.week.map((d) => ({ date: d.date, session: d.name, checkin: d.checkin })) };
+  if (w.restDay && !w.blocks.length) return { restDay: true, switchedFrom: w.override === 'rest' ? w.plannedSession : null, restEarnsPoints: w.rest?.counts ?? true, checkin, week: w.week.map((d) => ({ date: d.date, session: d.name, checkin: d.checkin })) };
   return {
-    session: w.dayName, focus: w.focus, checkin,
+    session: w.dayName, switchedFromRestDay: w.override === 'train', focus: w.focus, checkin,
     exercises: w.blocks.map((b) => ({ exerciseId: b.exerciseId, name: b.name, plan: b.plan && { sets: b.plan.sets, reps: `${b.plan.repMin}-${b.plan.repMax}`, rir: b.plan.rir, restSec: b.plan.restSec, tempo: b.plan.tempo }, done: b.sets.map((x) => `${x.weightKg} kg x ${x.reps}`), suggested: b.suggested, lastTime: b.last?.sets.map((x) => `${x.weightKg} x ${x.reps}`) })),
     cardio: { planned: w.cardioPlan, logged: w.cardio },
     completion: w.state?.completion, week: w.week.map((d) => ({ date: d.date, session: d.name, checkin: d.checkin })),
@@ -131,9 +126,11 @@ export async function runTool(db, user, today, name, args = {}) {
       case 'search_foods': {
         const prof = db.prepare('SELECT data FROM profiles WHERE user_id = ?').get(user.id);
         const prefs = prof ? JSON.parse(prof.data).prefs : {};
-        const all = loadFoods(db);
-        const allowed = new Set(filterFoods(all, prefs).map((f) => f.id));
-        return searchFoods(all, args.query).map((f) => ({ foodId: f.id, name: f.name, ar: f.ar, per100g: { kcal: f.kcal, p: f.p, c: f.c, f: f.f }, unit: f.unit, excludedForThisPerson: !allowed.has(f.id) }));
+        // Off-plan foods (pizza, burgers, sweets) are searchable so slips can be logged accurately;
+        // they are marked offPlan and must never be suggested as swaps or plan foods.
+        const all = loadFoods(db, { offplan: true });
+        const allowed = new Set(filterFoods(loadFoods(db), prefs).map((f) => f.id));
+        return searchFoods(all, args.query).map((f) => ({ foodId: f.id, name: f.name, ar: f.ar, per100g: { kcal: f.kcal, p: f.p, c: f.c, f: f.f }, units: unitsFor(f).filter((u) => !u.grams).map((u) => ({ key: u.key, name: u.name, grams: u.g })), offPlan: f.offplan || undefined, excludedForThisPerson: f.offplan ? undefined : !allowed.has(f.id) }));
       }
       case 'mark_plan_items': {
         const done = [];
@@ -144,14 +141,25 @@ export async function runTool(db, user, today, name, args = {}) {
         }
         return { ok: true, done };
       }
-      case 'log_food': return await call('POST', '/api/log/extra', { date, today, foodId: args.foodId, ...(args.unit ? { unit: args.unit, qty: args.qty } : { grams: args.grams }) });
+      case 'log_foods': {
+        const items = (Array.isArray(args.items) ? args.items : []).map((i) => ({ foodId: i.foodId, name: i.name, qty: i.qty, unit: i.unit, grams: i.grams, kcal: i.kcal, p: i.protein, c: i.carbs, f: i.fat }));
+        const r = await call('POST', '/api/log/foods', { date, today, meal: args.meal ?? null, items });
+        return { ok: r.ok, meal: r.mealName ?? 'not placed in a meal', results: r.results.map((x) => ({ food: x.name, amount: x.amount, kcal: x.kcal, how: x.error ? `error: ${x.error}` : x.as === 'planned' ? 'planned item, marked eaten' : x.as === 'adjusted' ? 'planned item, amount changed' : x.as === 'swapped' ? `eaten instead of ${x.instead}` : x.as === 'repeat' ? 'already logged, not added again' : x.offPlan ? 'added, off-plan' : 'added to the meal' })), today: r.day };
+      }
+      case 'move_food': return await call('POST', '/api/log/meal', { date, ref: args.ref, meal: /^none$/i.test(String(args.meal)) ? null : args.meal });
+      case 'log_food': {
+        // Older tool: routed through log_foods so it matches planned items and ignores repeats too.
+        const r = await call('POST', '/api/log/foods', { date, today, meal: args.meal ?? null, items: [{ foodId: args.foodId, qty: args.qty, unit: args.unit, grams: args.grams }] });
+        const x = r.results[0];
+        return x.error ? { error: x.error } : { ok: true, food: x.name, amount: x.amount, kcal: x.kcal, how: x.as, meal: r.mealName };
+      }
       case 'ate_amount': return await call('POST', '/api/log', { date, today, ref: args.ref, status: 'adjusted', ...(args.unit ? { unit: args.unit, qty: args.qty } : { grams: args.grams }) });
       case 'meal_options': {
         const r = await call('GET', `/api/plan/meal-options?date=${date}&meal=${Number(args.meal) || 0}`);
         return { now: r.meal, options: r.options.map((o) => ({ key: o.key, title: o.title, kcal: o.kcal, protein: o.p, items: o.items.map((i) => `${i.amount} ${i.name}`) })) };
       }
       case 'swap_meal': return await call('POST', '/api/plan/meal-swap', { date, meal: Number(args.meal) || 0, key: args.key, scope: args.scope });
-      case 'log_custom_food': return await call('POST', '/api/log/extra', { date, today, name: args.name, kcal: args.kcal, p: args.protein ?? 0, c: args.carbs ?? 0, f: args.fat ?? 0 });
+      case 'log_custom_food': return await call('POST', '/api/log/extra', { date, today, name: args.name, kcal: args.kcal, p: args.protein ?? 0, c: args.carbs ?? 0, f: args.fat ?? 0, meal: args.meal });
       case 'list_alternatives': {
         const r = await call('GET', `/api/plan/alternatives?date=${date}&ref=${encodeURIComponent(args.ref)}`);
         return { item: `${r.item.name} ${r.item.amount}`, group: r.groupLabel, options: r.options.slice(0, 15).map((o) => ({ foodId: o.foodId, name: o.name, amount: o.amount, kcalDiff: o.kcalDiff })) };
@@ -160,6 +168,17 @@ export async function runTool(db, user, today, name, args = {}) {
       case 'update_food_preferences': return await call('POST', '/api/profile/prefs', args);
       case 'change_goal': return await call('POST', '/api/profile/goal', args);
       case 'new_plan': return await call('POST', '/api/plan/regenerate', { note: String(args.reason ?? '').slice(0, 280) });
+      case 'set_training_day': return await call('POST', '/api/train/day', { date, today, kind: args.type, weekday: args.weekday });
+      case 'get_weekly_checkin': {
+        const { checkin: c } = await call('GET', `/api/checkin/weekly?today=${today}`);
+        if (c.status === 'off') return { status: 'off', why: c.reason === 'override' ? 'The admin set their targets by hand, so check-ins are off.' : 'No active diet plan yet.' };
+        if (c.status === 'closed') return { status: 'closed', nextCheckin: c.next, note: 'Check-ins open on Friday (with the weekly recap).' };
+        return { status: c.status, kind: c.kind, summary: c.text, trendKg: c.trendKg, ratePerWeek: c.ratePerWeek, goalRate: c.goalRate, avgIntake: c.avgIntake, fullyLoggedDays: c.days, weighIns: c.weighIns, maintenance: c.maintenance, kcal: c.kcal, result: c.result };
+      }
+      case 'answer_weekly_checkin': {
+        const r = await call('POST', '/api/checkin/weekly/answer', { today, answer: args.answer });
+        return { ok: true, status: r.checkin.status, result: r.checkin.result };
+      }
       case 'rebalance_today': return await call('POST', '/api/today/rebalance', { date });
       case 'log_weight': return await call('POST', '/api/metrics', { date, weightKg: args.kg });
       case 'add_water': return await call('POST', '/api/water', { date, add: args.ml });
@@ -249,14 +268,29 @@ WHO THEY ARE
 - Never eats: ${excluded.length ? excluded.join(', ') : 'nothing excluded'}${pr.vegetarian ? '; vegetarian' : ''}.${p.injuries ? ` Injuries: ${p.injuries}.` : ''}
 
 HOW YOU WORK
-- You can act, not just talk. When they tell you they ate something, log it. When they want a different food, swap it. When they dislike something, update their preferences. Do it, then say briefly what you did.
-- Today's plan and the food list are in this brief: act on them directly. Call get_day only for other dates or after you changed something and need fresh totals. Never invent ids, numbers or results.
-- If they ate something off-plan, log it, then offer (or if they asked, do) rebalance_today so the day still lands on target. Never suggest skipping protein.
-- If what they ate matches a planned item, mark that item eaten instead of logging it again. "Ate breakfast" means mark all breakfast items eaten.
+- You can act, not just talk. When they tell you what they ate or drank, LOG IT in the same turn with log_foods; never answer "done" or "logged" unless a tool call in this turn did it. When they want a different food, swap it. When they dislike something, update their preferences. Then say briefly what you did.
+- Today's plan, what is logged and the food list are in this brief: act on them directly. Call get_day only for other dates or after you changed something and need fresh totals. Never invent ids, numbers or results.
+
+LOGGING FOOD (most messages are this; get it right)
+- One log_foods call per meal, with EVERY food and drink they named for that meal, in their own amounts: "2 eggs" = qty 2 unit egg; "1 balady bread" = qty 1 unit loaf; "100gm bread" = grams 100; "3 tbsp sugar" = qty 3 unit tbsp; "100ml milk" = qty 100 unit ml; "a Nescafé 3-in-1" = qty 1 unit sachet. Never multiply or convert amounts yourself; the server does it.
+- Always give the meal: the one they said ("for breakfast", "على الغدا"); if they did not say, the meal that fits the time they ate (local time is in the brief). Drinks go in the meal they had them with.
+- A sandwich or dish described by its parts ("egg sandwich: 100 g bread, 2 eggs, 10 g cheddar") is logged as those parts. A known dish with no parts given (koshari, a shawarma sandwich, a slice of pizza) is one item.
+- The server matches the plan for you: a food that is on the plan for that meal is marked eaten (or the amount / food changed), everything else is added to the meal. So do not call mark_plan_items for foods you pass to log_foods, and never log the same report twice. If they ask "did you log it?", look at the day in this brief (each meal shows its items and what was added) and answer from it; log only what is missing.
+- Use foodIds from the food list in this brief or from search_foods. The list covers diet foods and many everyday foods and drinks (coffee, tea, juices, sauces, breads, sweets, fast food). For something truly not in the database, give its name with your best kcal / protein / carbs / fat estimate in the same log_foods call.
+- "Ate my breakfast / the whole lunch" means everything planned for that meal: mark_plan_items eaten.
+- After logging, reply with one short line of what was logged and where it stands ("Logged breakfast: 2 scrambled eggs, 100 g bread, 10 g cheddar and a Nescafé with milk and sugar. 1,240 kcal left today."). Read the numbers from the tool result.
+- Off-plan food (offPlan: true in search results: pizza, burgers, sweets, coffee-shop drinks): log it the same way, kindly and without guilt. Ask whether it replaced a meal (if yes, mark that meal's planned items skipped with mark_plan_items) and, if the day is now over target, offer rebalance_today. Never suggest off-plan foods as swaps or plan foods.
+- Something logged in the wrong meal: move_food. Logged by mistake: mark_plan_items clear for a planned item.
 - Prefer swaps ("today" unless they say always/every day) over new plans. Use new_plan only when they want a different overall menu.
-- Amounts: Egyptians say pieces, not grams ("3 eggs", "a loaf of baladi", "a plate of koshari", "2 cups of rice"). Log them in those units with qty + unit from the food list (ate_amount for a planned item eaten in a different amount, log_food for extras); use grams only when they give grams. Say back what you logged in their words ("3 eggs", not "150 g").
 - A whole meal they want different ("I don't want mahshi today", "something else for dinner"): meal_options, then swap_meal with their pick (today unless they say every day). Dinner stays light and lunch is the one cooked meal.
 - If a change would be unsafe (below their calorie floor, crash diets, more than 1% bodyweight loss per week), refuse kindly and offer the safe version.
+
+POINTS (the monthly competition; explain them like this)
+- Up to 100 a day: calories 20 and protein 20 from DIET food, meals matched 20, logging on the day 10, training 30.
+- Meals matched: each meal's diet food (planned items, swaps, and diet foods logged into that meal) is compared with that meal's plan on calories, protein, carbs and fat; within 10% is full marks, then 1% lost per 1% off, bigger meals weigh more. So logging food INTO THE RIGHT MEAL matters.
+- Off-plan / logging-only food (pizza, sweets, coffee drinks, sauces) and custom entries never earn points, even when the day stays under target.
+- ${p.goal === 'bulk' ? 'They are bulking, so going over calories costs no points.' : `They are ${p.goal === 'maintain' ? 'maintaining: going more than 10%' : 'cutting: going more than 5%'} over the day's calories (everything eaten counts) costs 1 point per % over, up to 30.`}
+- A gym check-in on a planned rest day is an extra session: +10 bonus (not when a training day was switched to rest that week).
 
 COACHING RULES (from Egyptian coaches)
 - Carbs (rice, pasta, oats...) are weighed dry/raw; protein is weighed cooked. The app shows both.
@@ -272,7 +306,8 @@ TRAINING (you can see and change everything about their training)
 - When they report a lift ("leg press 120 for 10, 10, 9" / "عملت بنش 60 في 10") log it with log_sets. "Did it as planned" means complete_exercise with the suggested numbers. Never invent numbers they did not give.
 - Progression is double progression: when every set hits the top of the range, add weight next time (the app suggests it).
 - A machine is taken or missing, or an exercise feels wrong: offer exercise_alternatives, then swap_exercise. Pain is different: do not program around pain; tell them to stop that movement and use ask_admin.
-- Gym attendance is proven only by a check-in photo in the Train tab (it earns half the training points; ticked sets earn the other half). You cannot check them in or approve check-ins; tell them to tap "Check in" on the Train tab.
+- Training points (30 a day) come only from the gym check-in photo in the Train tab: any training counts (gym, CrossFit, a class, football). Training on a planned rest day adds a 10-point bonus. Logging sets is optional, for records and PRs, and earns no points. You cannot check them in or approve check-ins; tell them to tap "Check in" on the Train tab.
+- Rest or train today? Use set_training_day: a planned session day can become a rest day, a rest day can become a training day (doing the next session of the week, or the one they name). Rest days earn the 30 when the day is logged, but only as many per week as their plan has rest days; an extra rest day earns 0 unless they train on another rest day instead.
 - Their training details (days, weekdays, equipment, experience) can be changed with change_training.
 
 SAFETY
@@ -280,9 +315,9 @@ SAFETY
 - If someone talks about not eating, purging, or hating their body, respond with care, do not push targets, suggest talking to someone they trust or a professional, and use ask_admin.
 
 STYLE
-- Reply in the language they write in. If they write Egyptian Arabic (عربي مصري), reply in Egyptian Arabic.
+- Reply in the language of their LAST message (stated at the end of this brief). English message: English reply, even if earlier messages or food names were Arabic. Arabic message: Egyptian Arabic.
 - Short and warm, like a friend who is a good coach. 1-4 sentences, a short list only when it helps. No lectures, no emojis unless they use them.
-- Numbers: round grams to what people can measure (slices, eggs, 10 g steps).`;
+- Numbers: round grams to what people can measure (slices, eggs, 10 g steps). Use the amounts they used ("3 eggs", not "150 g").`;
 }
 
 // ---------------------------------------------------------------- the model
@@ -293,14 +328,18 @@ async function chatOnce(cfg, model, messages, { tools, fetchImpl }) {
     const res = await fetchImpl(`${cfg.baseUrl}/chat/completions`, {
       method: 'POST', signal: ac.signal,
       headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.key}` },
-      body: JSON.stringify({ model, temperature: 0.4, max_tokens: 1200, messages, ...(tools ? { tools: TOOLS, tool_choice: 'auto' } : {}) }),
+      // Room for thinking models (Kimi, DeepSeek, Nemotron) to reason AND then call the tool:
+      // at 1,200 tokens they often ran out mid-thought and the call never came.
+      body: JSON.stringify({ model, temperature: 0.4, max_tokens: 4096, messages, ...(tools ? { tools: TOOLS, tool_choice: 'auto' } : {}) }),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw Object.assign(new Error(`AI provider answered ${res.status}`), { status: res.status, body: text.slice(0, 400), model });
     }
     const data = await res.json();
-    return data.choices?.[0]?.message ?? { content: '' };
+    const msg = data.choices?.[0]?.message ?? { content: '' };
+    // Some models write the tool call as text in their own format: turn it into a real call.
+    return tools ? normalizeToolCalls(msg, TOOL_NAMES) : msg;
   } finally { clearTimeout(timer); }
 }
 
@@ -383,7 +422,17 @@ export async function quickIntent(db, user, today, text) {
   return null;
 }
 
-export async function coachTurn({ db, user, text, today, history = [], env = process.env, fetchImpl }) {
+// A message that reports eating or drinking (English, Egyptian Arabic, or Franco-Arabic).
+const FOOD_REPORT = /\b(ate|eaten|eat|had|having|drank|drink|drunk|log(ged)?|breakfast|lunch|dinner|snack|for (breakfast|lunch|dinner))\b|اكلت|أكلت|كلت|شربت|فطرت|اتغديت|اتعشيت|فطار|غدا|عشا/i;
+const QUESTION = /\?|^(how|what|why|when|which|can|could|should|is|are|do|does|will|would)\b|^(ازاي|ايه|ليه|امتى|هل|ممكن)/i;
+/** The language to answer in: the script of their last message (Arabic letters vs Latin letters). */
+export function replyLanguage(text) {
+  const ar = (String(text).match(/[\u0600-\u06FF]/g) ?? []).length;
+  const la = (String(text).match(/[A-Za-z]/g) ?? []).length;
+  return ar > la ? 'Egyptian Arabic' : 'English';
+}
+
+export async function coachTurn({ db, user, text, today, clock = null, history = [], env = process.env, fetchImpl }) {
   const quick = await quickIntent(db, user, today, text).catch(() => null);
   if (quick) return quick;
   const cfg = aiConfig(env);
@@ -403,17 +452,32 @@ export async function coachTurn({ db, user, text, today, history = [], env = pro
     const us = unitsFor(f).filter((u) => u.key !== 'g').map((u) => (u.key === 'dry' ? `dry: 1 g dry = ${u.g} g` : `${u.key}: 1 ${u.name} = ${u.g} g`));
     return `${f.id}: ${f.name}${f.ar ? ` / ${f.ar}` : ''}${us.length ? ` [${us.join('; ')}]` : ''}`;
   }).join('\n');
-  const context = `\n\nTODAY (${today}), already loaded, no need to call get_day for it:\n${JSON.stringify(day)}\n\nTODAY'S TRAINING (already loaded, no need to call get_workout for today):\n${JSON.stringify(workout)}\n\nFOODS THIS PERSON EATS (foodId: name / Arabic [unit]); use these ids directly, search_foods only if nothing fits:\n${foodIndex}`;
+  // Everyday drinks, sauces and breads people log all the time (logging only, never plan food).
+  const extrasIndex = loadFoods(db, { offplan: true }).filter((f) => f.offplan && ['drinks', 'basics', 'bakery'].includes(f.cat))
+    .map((f) => `${f.id}: ${f.name}${f.unit ? ` [${f.unit.name} = ${f.unit.g} g]` : ''}`).join('\n');
+  const lang = replyLanguage(text);
+  const context = `\n\nLOCAL TIME NOW: ${clock ?? 'unknown'} on ${today}.\n\nTODAY (${today}), already loaded, no need to call get_day for it:\n${JSON.stringify(day)}\n\nTODAY'S TRAINING (already loaded, no need to call get_workout for today):\n${JSON.stringify(workout)}\n\nFOODS THIS PERSON EATS (foodId: name / Arabic [unit]); use these ids directly, search_foods for anything else (sweets, fast food, dishes):\n${foodIndex}\n\nEVERYDAY DRINKS, SAUCES AND BREADS (logging only; ml works for any drink):\n${extrasIndex}\n\nREPLY LANGUAGE for this message: ${lang}.`;
   const messages = [
     { role: 'system', content: systemPrompt({ user, profile, targets, today }) + context },
     ...history.map((m) => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })),
     { role: 'user', content: text },
   ];
   const actions = [];
+  let nudged = false;
   for (let step = 0; step < 8; step++) {
     const msg = await chat(cfg, messages, { fetchImpl, db });
     const calls = msg.tool_calls ?? [];
-    if (!calls.length) return { reply: stripThink(msg.content) || 'Done.', actions };
+    if (!calls.length) {
+      // Models sometimes answer "Done." to a food report without logging anything. Once per turn,
+      // remind it to act; a real question ("how much rice can I eat?") is left alone.
+      if (!nudged && !actions.length && FOOD_REPORT.test(text) && !QUESTION.test(text.trim())) {
+        nudged = true;
+        messages.push({ role: 'assistant', content: msg.content ?? '' });
+        messages.push({ role: 'user', content: '[app] Nothing was logged: no tool was called. If my last message says what I ate or drank, call log_foods now (one call per meal, every item, my amounts, the meal). If it does not, just answer it.' });
+        continue;
+      }
+      return { reply: stripThink(msg.content) || fallbackReply(db, actions), actions };
+    }
     messages.push({ role: 'assistant', content: msg.content ?? '', tool_calls: calls });
     for (const c of calls) {
       let args = {};
@@ -423,17 +487,51 @@ export async function coachTurn({ db, user, text, today, history = [], env = pro
       messages.push({ role: 'tool', tool_call_id: c.id, content: JSON.stringify(result).slice(0, 6000) });
     }
   }
-  return { reply: 'I made the changes above. Anything else?', actions };
+  return { reply: fallbackReply(db, actions), actions };
+}
+
+/** When the model gives no text: say what was actually done, never a bare "Done.". */
+function fallbackReply(db, actions) {
+  const foodsById = new Map(loadFoods(db, { includeInactive: true }).map((f) => [f.id, f]));
+  const did = actions.map((a) => actionLabel(a, foodsById)).filter(Boolean);
+  const failed = actions.filter((a) => a.result?.error).map((a) => a.result.error);
+  if (did.length) return `${did.join('. ')}.${failed.length ? ` One thing did not work: ${failed[0]}` : ''}`;
+  if (failed.length) return `That did not work: ${failed[0]}`;
+  return 'Sorry, I did not catch that. Tell me what you ate and for which meal (for example "2 eggs and a loaf of baladi for breakfast"), or ask me anything about your plan.';
 }
 
 /** Short human labels for actions, shown as chips under the coach's reply. */
+// "Baladi bread" from "Baladi bread", "Eggs" from "Eggs, boiled": the chip stays one short line.
+const shortName = (n) => String(n ?? '').split(/[,(]/)[0].trim().toLowerCase();
+/** "2 eggs", "1 loaf baladi bread", "100 ml milk": amount and food without saying the unit twice. */
+export function foodChip(amount, food) {
+  const s = shortName(food);
+  amount = amount ? String(amount).replace(/\s*\(about [^)]*\)/, '') : amount; // "100 g (about 1 loaf)" -> "100 g"
+
+  const m = /^([\d.½]+)\s+(.+)$/.exec(String(amount ?? ''));
+  if (!m) return amount ? `${amount} ${s}` : s;
+  const unit = m[2].toLowerCase();
+  if (/^(g|ml|g dry)\b|\(/.test(unit)) return `${amount} ${s}`;
+  const sing = unit.replace(/(es|s)$/, '');
+  if (s.startsWith(sing)) return amount;
+  if (s.includes(sing)) return `${m[1]} ${s}`;
+  return `${amount} ${s}`;
+}
+
 export function actionLabel(a, foodsById) {
   const r = a.result ?? {};
   if (r.error) return null;
   const name = (id) => foodsById.get(id)?.name ?? id;
   switch (a.tool) {
     case 'mark_plan_items': return a.args.status === 'clear' ? 'Cleared items' : `Marked ${a.args.refs?.length ?? 0} item${a.args.refs?.length === 1 ? '' : 's'} ${a.args.status}`;
-    case 'log_food': return `Logged ${name(a.args.foodId)}${foodsById.get(a.args.foodId) ? `, ${describeAmount(foodsById.get(a.args.foodId), a.args.grams)}` : ''}`;
+    case 'log_foods': {
+      const done = (r.results ?? []).filter((x) => !x.how?.startsWith('error') && x.how !== 'already logged, not added again');
+      if (!done.length) return (r.results ?? []).some((x) => x.how === 'already logged, not added again') ? 'Already logged' : null;
+      const what = done.map((x) => foodChip(x.amount, x.food)).join(', ');
+      return `${r.meal && r.meal !== 'not placed in a meal' ? `${r.meal}: ` : 'Logged '}${what}`;
+    }
+    case 'move_food': return r.ok ? 'Moved to another meal' : null;
+    case 'log_food': return r.ok ? `Logged ${foodChip(r.amount, r.food ?? name(a.args.foodId))}` : null;
     case 'log_custom_food': return `Logged ${a.args.name} (${Math.round(a.args.kcal)} kcal)`;
     case 'ate_amount': return r.ok ? 'Logged a different amount' : null;
     case 'swap_meal': return r.ok ? (a.args.scope === 'reset' ? 'Put the planned meal back' : `Meal changed to ${r.title} (${a.args.scope === 'always' ? 'every day' : 'today'})`) : null;
@@ -441,6 +539,8 @@ export function actionLabel(a, foodsById) {
     case 'update_food_preferences': return r.regenerated ? `Preferences saved · new plan ${r.regenerated.status === 'active' ? 'is live' : 'sent to admin'}` : 'Preferences saved';
     case 'change_goal': return `Targets updated: ${r.targets?.kcal ?? '?'} kcal`;
     case 'new_plan': return r.status === 'active' ? 'New plan is live' : 'New plan sent to the admin';
+    case 'set_training_day': return r.ok ? (r.restDay ? 'Made it a rest day' : `Training day: ${r.dayName}`) : null;
+    case 'answer_weekly_checkin': return r.status === 'accepted' && r.result ? `Check-in applied: ${r.result.kcal.to.toLocaleString('en-US')} kcal a day${r.result.planStatus === 'active' ? ', plan updated' : ''}` : r.status === 'kept' ? 'Kept your current plan' : null;
     case 'rebalance_today': return r.changed ? `Rest of today trimmed to ${r.after} kcal` : null;
     case 'log_weight': return `Weight logged: ${a.args.kg} kg`;
     case 'add_water': return `${a.args.ml > 0 ? 'Added' : 'Removed'} ${Math.abs(a.args.ml)} ml water`;

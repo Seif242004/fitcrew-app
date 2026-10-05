@@ -12,6 +12,8 @@
 
 const M = (name, plural, g, half = true) => ({ name, plural, g, half });
 
+import { OFFPLAN_MEASURES } from './offplan-foods.js';
+
 export const MEASURES = {
   // protein
   'chicken-breast': [M('fillet', 'fillets', 150)],
@@ -123,10 +125,35 @@ export const MEASURES = {
   konafa: [M('piece', 'pieces', 100)],
   'om-ali': [M('bowl', 'bowls', 200)],
   popcorn: [M('cup', 'cups', 8)],
+  sugar: [M('tbsp', 'tbsp', 12, false)],
+  honey: [M('tsp', 'tsp', 7, false)],
+  // everyday foods (logging and swaps)
+  'eggs-scrambled': [M('plate (3 eggs)', 'plates', 180)],
+  cheddar: [M('tbsp grated', 'tbsp grated', 7, false)],
+  feta: [M('cube', 'cubes', 10, false), M('slice', 'slices', 30, false)],
+  parmesan: [M('tbsp', 'tbsp', 5, false)],
+  rayeb: [M('cup', 'cups', 240)],
+  'white-beans': [M('cup', 'cups', 180)],
+  'black-eyed-peas': [M('cup', 'cups', 170)],
+  couscous: [M('cup', 'cups', 157)],
+  corn: [M('cup', 'cups', 145), M('cob', 'cobs', 100)],
+  peas: [M('cup', 'cups', 160)],
+  okra: [M('cup', 'cups', 160)],
+  cherries: [M('cup', 'cups', 140)],
+  pineapple: [M('slice', 'slices', 85)],
+  blueberries: [M('cup', 'cups', 148)],
+  pistachios: [M('handful', 'handfuls', 25)],
+  hazelnuts: [M('handful', 'handfuls', 25)],
+  'pumpkin-seeds': [M('handful', 'handfuls', 25)],
+  chia: [M('tbsp', 'tbsp', 12, false)],
+  'chicken-roast': [M('quarter chicken', 'quarter chickens', 250)],
+  kebab: [M('skewer', 'skewers', 80)],
+  basa: [M('fillet', 'fillets', 150)],
+  bouri: [M('fish', 'fish', 250)],
 };
 
 // Plural forms of the seed units (foods-seed.js `unit.name`).
-const PLURAL = { loaf: 'loaves', sandwich: 'sandwiches', hawawshi: 'hawawshi', tbsp: 'tbsp', tsp: 'tsp', white: 'whites', bowl: 'bowls', cup: 'cups' };
+const PLURAL = { glass: 'glasses', loaf: 'loaves', sandwich: 'sandwiches', hawawshi: 'hawawshi', tbsp: 'tbsp', tsp: 'tsp', white: 'whites', bowl: 'bowls', cup: 'cups' };
 const plural = (name) => PLURAL[name] ?? `${name}s`;
 // Seed units that may be halved (half a loaf, 1½ bowls). Eggs, slices, pieces... are whole.
 const HALF = new Set(['loaf', 'bowl', 'cup', 'tbsp', 'banana', 'apple', 'orange', 'bottle', 'sandwich', 'hawawshi']);
@@ -140,7 +167,7 @@ const HALF = new Set(['loaf', 'bowl', 'cup', 'tbsp', 'banana', 'apple', 'orange'
 export function unitsFor(food) {
   const out = [];
   if (food?.unit?.g) out.push({ key: 'u', name: food.unit.name, plural: plural(food.unit.name), g: food.unit.g, step: HALF.has(food.unit.name) ? 0.5 : 1 });
-  (MEASURES[food?.id] ?? []).forEach((m, i) => {
+  (MEASURES[food?.id] ?? OFFPLAN_MEASURES[food?.id] ?? []).forEach((m, i) => {
     if (out.some((u) => u.name === m.name)) return;
     out.push({ key: `m${i}`, name: m.name, plural: m.plural, g: m.g, step: m.half ? 0.5 : 1 });
   });
@@ -159,7 +186,8 @@ export function niceCount(n) {
 /** "3 eggs", "1½ cups", "120 g". qty is in the unit's own count. */
 export function formatQty(unit, qty) {
   if (unit.grams) return unit.key === 'dry' ? `${Math.round(qty)} g dry` : `${Math.round(qty)} g`;
-  return `${niceCount(qty)} ${qty <= 1 ? unit.name : unit.plural}`;
+  // Singular or plural from the count as shown: 1.1 loaves reads "1 loaf", never "1 loaves".
+  return `${niceCount(qty)} ${Math.round(qty * 2) / 2 <= 1 ? unit.name : unit.plural}`;
 }
 
 /** Convert a logged amount { qty, unit key } to grams as eaten. Returns null for an unknown unit. */

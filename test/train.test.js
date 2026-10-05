@@ -93,9 +93,9 @@ test('training flow: draft, approve, log, progress, records, score', async (t) =
   assert.equal((await sam.post('/api/train/set', { date: MON, today: MON, exerciseId: 'nope', setNo: 1, weightKg: 1, reps: 1 })).status, 400);
   assert.equal((await sam.post('/api/train/set', { date: MON, today: MON, exerciseId: exId, setNo: 1, weightKg: 60, reps: 0 })).status, 400);
 
-  // every set ticked = half the training points; the gym check-in earns the other half
+  // ticked sets are for records only; the gym check-in earns all 30 training points
   let adh = (await sam.get(`/api/adherence?days=7&today=${MON}`)).body;
-  assert.equal(adh.scores.find((s) => s.date === MON).parts.workout, 15);
+  assert.equal(adh.scores.find((s) => s.date === MON).parts.workout, 0);
   assert.equal((await admin.post(`/api/admin/users/${samId}/checkins`, { date: MON })).status, 200);
   adh = (await sam.get(`/api/adherence?days=7&today=${MON}`)).body;
   assert.equal(adh.scores.find((s) => s.date === MON).parts.workout, 30);

@@ -1,7 +1,9 @@
-// Train tab: today's session from the coach-style plan, ticked off set by set.
-//   - Attendance week (Saturday to Friday) and the gym check-in photo (15 points).
-//   - Every exercise shows sets x reps, RIR, rest, tempo, a demo video and what to lift today.
-//     One tap on the check logs the suggested weight x reps (15 points for all sets).
+// Train tab: today's session from the coach-style plan.
+//   - Attendance week (Saturday to Friday) and the gym check-in photo: all 30 training points,
+//     whatever was trained (gym, CrossFit, a class).
+//   - One tap turns the day into a rest day or a training day (the day bar under the week).
+//   - Exercises are compact rows; tap one to open its sets. Logging sets is optional, for
+//     records and PRs (one tap on the check logs the suggested weight x reps).
 //   - Warm-up, post-workout cardio, the whole week's plan, history and records.
 import { h } from '../dom.js';
 import { screenTip } from '../tour.js';
@@ -9,7 +11,7 @@ import { api, send } from '../api.js';
 import { state, localDate, shiftDate, fmtDate, fmt, fmt1 } from '../state.js';
 import { paint, loading, guard } from '../shell.js';
 import { navigate } from '../router.js';
-import { icon, sheet, toast, emptyState, field, numInput, exercisePicker, confirmSheet, celebrate, local } from '../ui.js';
+import { icon, sheet, toast, emptyState, field, numInput, exercisePicker, confirmSheet, celebrate, local, seg } from '../ui.js';
 import { shrink, averageHash } from './progress.js';
 import { SPLIT_CHOICES, INTENSITY_CHOICES } from './onboarding.js';
 
@@ -129,7 +131,7 @@ function build(d, ctx) {
     h('h1', { class: 'title', style: 'margin-bottom:2px' }, d.dayName ?? (d.restDay ? 'Rest day' : 'Train')),
     h('p', { class: 'sub' }, `${date === today ? 'Today' : fmtDate(date, { weekday: 'long' })} · ${fmtDate(date, { day: 'numeric', month: 'long' })}${d.focus ? ` · ${d.focus}` : ''}${d.minutes ? ` · about ${d.minutes} min` : ''}`),
     weekBar(d, ctx),
-    d.hasPlan ? screenTip('train', 'How training works', 'Each set shows what to lift. Tap the check when a set is done (the rest timer starts), tap the numbers to change them, ▶ shows the form. Check in with a gym photo for 15 points.') : null);
+    d.hasPlan ? screenTip('train', 'How training works', 'Check in with a gym photo for your 30 training points; any training counts. Logging sets is optional: tap an exercise to open it, tick sets for your records and PRs. Resting today instead? Switch the day to a rest day.') : null);
 
   if (!d.hasPlan && !d.blocks.length) {
     return [head, d.hasPending
@@ -138,9 +140,9 @@ function build(d, ctx) {
     footerLinks()];
   }
 
-  // Live state the cards share: progress and points update without reloading the page.
+  // Live state the cards share: the set count updates without reloading the page.
   const live = { d, ctx, prs: 0, refresh: () => {} };
-  const progress = progressCard(live);
+  const progress = setCount(live);
   const wasDone = sessionComplete(d);
   live.refresh = () => {
     progress.update();
@@ -154,13 +156,16 @@ function build(d, ctx) {
   const blocks = d.blocks.map((b, i) => exerciseCard(b, i, live));
   return [
     head,
+    dayBar(d, ctx),
     d.offline ? h('p', { class: 'notice', style: 'margin-top:12px' }, 'Offline: showing the last copy on this phone. Ticks are saved and sync when you are back online.') : null,
     d.cycle?.deload && !(d.restDay && !d.blocks.length) ? h('div', { class: 'strip', 'data-tone': 'muted', style: 'margin-top:12px' }, h('span', { class: 'ico' }, icon('info', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Deload week'), h('span', { class: 'sub' }, 'Half the sets, lighter weights, more in reserve. You recover and come back stronger. Next week brings fresh exercise variations.'))) : null,
     d.restDay && !d.blocks.length ? restCard(d, ctx) : null,
     checkinCard(d, ctx),
-    d.restDay && !d.blocks.length ? null : progress.el,
     d.warmup.length ? warmupSection(d) : null,
-    ...blocks,
+    blocks.length ? h('section', { class: 'section exlist' },
+      h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Exercises'), progress.el),
+      h('p', { class: 'meta exlist-tip' }, 'Optional: log sets for your records and PRs.'),
+      blocks) : null,
     d.cardioPlan || d.cardio.length ? cardioCard(d, ctx) : null,
     h('p', { style: 'margin-top:16px;display:flex;gap:20px;flex-wrap:wrap' },
       h('button', { class: 'link', onclick: () => extraExercise(live) }, d.restDay ? 'Log a workout anyway' : 'Add an extra exercise'),
@@ -198,17 +203,17 @@ function checkinCard(d, ctx) {
   const ci = d.checkin;
   const isToday = ctx.date === ctx.today;
   if (!isToday && !ci) return d.restDay ? null : h('div', { class: 'strip', 'data-tone': 'muted' }, h('span', { class: 'ico' }, icon('camera', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'No gym check-in'), h('span', { class: 'sub' }, 'Check-ins can only be sent on the day.')));
-  if (ci?.status === 'approved') return h('div', { class: 'strip done' }, h('span', { class: 'ico' }, icon('check', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Checked in at the gym'), h('span', { class: 'sub' }, '+15 training points')));
+  if (ci?.status === 'approved') return h('div', { class: 'strip done' }, h('span', { class: 'ico' }, icon('check', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Checked in at the gym'), h('span', { class: 'sub' }, d.state?.extraSession ? '+30 training points and +10 for an extra session' : '+30 training points for today')));
   // 'pending' only exists on check-ins sent before photos were auto-approved.
   if (ci?.status === 'pending') return h('div', { class: 'strip', 'data-tone': 'warn' }, h('span', { class: 'ico' }, icon('clock', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Check-in sent'), h('span', { class: 'sub' }, 'Waiting for the admin.')));
   if (!isToday) return h('div', { class: 'strip', 'data-tone': 'bad' }, h('span', { class: 'ico' }, icon('close', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Check-in revoked'), h('span', { class: 'sub' }, ci.reason || 'The admin removed this check-in. Ask them if this looks wrong.')));
-  if (d.restDay && !ci) return h('p', { class: 'sub', style: 'margin-top:12px' }, 'Trained anyway? ', h('button', { class: 'link', onclick: () => capture(ctx) }, 'Check in at the gym'));
+  if (d.restDay && !ci) return h('p', { class: 'sub', style: 'margin-top:12px' }, 'Trained anyway? ', h('button', { class: 'link', onclick: () => capture({ ...ctx, extraBonus: d.extraBonus }) }, d.extraBonus ? 'Check in for 30 + 10 bonus points' : 'Check in for 30 points'));
 
   const rejected = ci?.status === 'rejected';
   return h('div', { class: `checkin ${rejected ? 'rejected' : ''}` },
     h('div', { class: 'grow' },
       h('span', { class: 'h3' }, rejected ? 'Check-in revoked' : 'Check in at the gym'),
-      h('span', { class: 'sub' }, rejected ? `${ci.reason ? `${ci.reason}. ` : 'The admin removed this photo. '}Send a new photo taken at the gym today.` : 'Snap a photo at the gym: a selfie, the machines or the rack. It counts straight away for 15 points.')),
+      h('span', { class: 'sub' }, rejected ? `${ci.reason ? `${ci.reason}. ` : 'The admin removed this photo. '}Send a new photo taken at the gym today.` : 'A photo where you train: the gym, a CrossFit box, a class. It counts straight away for all 30 training points.')),
     h('button', { class: 'btn', onclick: (e) => capture(ctx, e.currentTarget) }, icon('camera', 20), rejected ? 'Try again' : 'Check in'));
 }
 
@@ -225,7 +230,7 @@ function capture(ctx, btn) {
       const image = await shrink(file, { max: 720, quality: 0.7, maxBytes: 150_000 });
       const ahash = await averageHash(image);
       const r = await api('POST', '/api/checkins', { date: ctx.today, image, ahash });
-      toast(r.status === 'approved' ? 'Checked in. +15 points' : 'Check-in sent');
+      toast(r.status === 'approved' ? (ctx.extraBonus ? 'Checked in. +30 points and +10 for an extra session' : 'Checked in. +30 points') : 'Check-in sent');
       ctx.reload();
     } catch (e) {
       toast(e.message, 'bad');
@@ -235,24 +240,57 @@ function capture(ctx, btn) {
   input.click();
 }
 
-// ---------------------------------------------------------------- progress and points
-function progressCard(live) {
-  const el = h('section', { class: 'section tprog' });
+// ---------------------------------------------------------------- sets logged (optional)
+/** "3 of 21 sets" next to the Exercises heading. Logging is optional, so no points here. */
+function setCount(live) {
+  const el = h('span', { class: 'sub' });
   const update = () => {
     const { d } = live;
     const planned = d.blocks.reduce((a, b) => a + (b.plan?.sets ?? 0), 0);
     const done = d.blocks.reduce((a, b) => a + b.sets.length, 0);
-    const completion = planned ? Math.min(1, done / planned) : 0;
-    const pts = (d.checkin?.status === 'approved' ? 15 : 0) + Math.round(15 * completion * 10) / 10;
-    el.replaceChildren(
-      h('div', { class: 'spread' },
-        h('span', {}, h('span', { class: 'num', style: 'font-size:36px' }, done), h('span', { class: 'sub' }, planned ? ` of ${planned} sets` : ' sets')),
-        h('span', { class: 'sub', style: 'text-align:right' }, h('b', { class: 'num', style: 'font-size:22px;color:var(--ink)' }, fmt1(pts)), ' / 30 training points')),
-      h('div', { class: 'tbar', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': Math.round(completion * 100), 'aria-label': 'Sets done' }, h('i', { style: `transform:scaleX(${completion})` })),
-      h('p', { class: 'meta', style: 'padding:8px 0 10px' }, completion >= 1 ? (d.checkin?.status === 'approved' ? 'Session complete. Great work.' : 'All sets done. Check in at the gym for the other 15 points.') : 'Tap the check when a set is done. Tap the numbers to change them.'));
+    el.textContent = done ? `${done}${planned ? ` of ${planned}` : ''} sets logged` : `${d.blocks.length} exercise${d.blocks.length === 1 ? '' : 's'}${planned ? ` · ${planned} sets` : ''}`;
   };
   update();
   return { el, update };
+}
+
+// ---------------------------------------------------------------- rest / training day switch
+/**
+ * One tap: today becomes a rest day or a training day. A rest day turned into a training day
+ * does the next session of the week by default; the picker underneath changes which one.
+ */
+function dayBar(d, ctx) {
+  if (!d.hasPlan || ctx.date !== ctx.today) return null;
+  const trained = d.checkin?.status === 'approved';
+  const change = async (kind, weekday) => {
+    try {
+      const r = await api('POST', '/api/train/day', { date: ctx.date, today: ctx.today, kind, weekday });
+      navigator.vibrate?.(10);
+      toast(r.restDay ? 'Rest day today' : `Training day: ${r.dayName}`, '', { label: 'Undo', run: async () => { try { await api('POST', '/api/train/day', { date: ctx.date, today: ctx.today, kind: d.override ? (d.override === 'rest' ? 'rest' : 'train') : 'plan', weekday: d.sessionWeekday ?? undefined }); ctx.reload(); } catch (e) { toast(e.message, 'bad'); } } });
+      ctx.reload();
+    } catch (e) { toast(e.message, 'bad'); ctx.reload(); }
+  };
+  const switcher = trained
+    ? null // checked in: it is a training day, nothing to switch
+    : seg([['train', 'Training day'], ['rest', 'Rest day']], d.restDay ? 'rest' : 'train', (v) => change(v), 'Today is a');
+  // Which session a switched-in training day does.
+  const picker = d.override === 'train' && d.sessions.length > 1
+    ? h('label', { class: 'daypick' }, h('span', { class: 'sub' }, 'Doing'),
+        h('select', { 'aria-label': 'Which session', onchange: (e) => change('train', Number(e.target.value)) },
+          d.sessions.map((x) => h('option', { value: x.weekday, selected: x.weekday === d.sessionWeekday ? true : null }, `${x.name} (${WEEKDAYS[x.weekday].slice(0, 3)})`))))
+    : null;
+  // Pulled a later session forward? Offer to rest on its planned day this week (one tap).
+  const later = d.override === 'train' ? d.week.find((x) => x.date > ctx.date && x.planned && !x.override && new Date(`${x.date}T00:00:00Z`).getUTCDay() === d.sessionWeekday) : null;
+  const moveBtn = later ? h('button', { class: 'link daybar-move', onclick: async (e) => {
+    e.currentTarget.disabled = true;
+    try { await api('POST', '/api/train/day', { date: later.date, today: ctx.today, kind: 'rest' }); toast(`${WEEKDAYS[d.sessionWeekday]} is now a rest day`); ctx.reload(); } catch (err) { toast(err.message, 'bad'); e.currentTarget.disabled = false; }
+  } }, `Make ${WEEKDAYS[d.sessionWeekday]} a rest day`) : null;
+  const note = d.override === 'rest' && d.plannedSession ? `${d.plannedSession} was planned for today.`
+    : d.override === 'train' && !d.plannedSession
+      ? (later ? `Today was a rest day in your plan. ${d.dayName} is also planned on ${WEEKDAYS[d.sessionWeekday]}.` : 'Today was a rest day in your plan.')
+      : null;
+  if (!switcher && !picker && !note) return null;
+  return h('div', { class: 'daybar' }, switcher, picker, note ? h('p', { class: 'meta' }, note) : null, moveBtn);
 }
 
 // ---------------------------------------------------------------- warm-up
@@ -287,11 +325,17 @@ export function videoSheet(x) {
 }
 const videoBtn = (x) => h('button', { class: 'vbtn', type: 'button', 'aria-label': `Watch how to do ${x.name}`, onclick: () => videoSheet(x) }, icon('play', 18));
 
-// ---------------------------------------------------------------- exercise card
+// ---------------------------------------------------------------- exercise rows
+// Exercises start folded: one line each (name, sets x reps, rest). The arrow opens the sets.
+// Which ones are open survives reloads of the screen for the same day.
+const opened = new Set();
+
 function exerciseCard(b, index, live) {
   const { ctx } = live;
-  const el = h('section', { class: 'section ex' });
-  let open = null; // null = automatic (collapsed once every planned set is done)
+  const el = h('div', { class: 'ex' });
+  const key = `${ctx.date}:${b.exerciseId}`;
+  let open = opened.has(key);
+  const toggle = () => { open = !open; if (open) opened.add(key); else opened.delete(key); draw(); };
 
   // What the next tap logs: the last logged set's numbers, otherwise today's suggestion.
   const next = () => {
@@ -336,7 +380,7 @@ function exerciseCard(b, index, live) {
       const have = new Set(b.sets.map((s) => s.setNo));
       for (let s = 1; s <= (b.plan?.sets ?? 0); s++) if (!have.has(s)) b.sets.push({ setNo: s, weightKg: isBodyweight(b) ? 0 : kg, reps });
       if (r.pr) { live.prs++; prMoment(b, kg, reps, r.e1rm); }
-      open = null; draw(); live.refresh();
+      draw(); live.refresh();
     } catch (e) { toast(e.message, 'bad'); }
   };
 
@@ -348,23 +392,35 @@ function exerciseCard(b, index, live) {
     const total = plannedSets() + extra;
     const doneCount = b.sets.length;
     const complete = b.plan ? doneCount >= b.plan.sets : false;
-    const expanded = open ?? !complete;
+    const expanded = open;
     const p = b.plan;
+    // Folded line: the prescription, plus what is logged so far.
+    const rxLine = p ? `${p.sets} × ${p.repMin}–${p.repMax}${b.timed ? ' sec' : ''}${isSuperFirst(p) ? ' · superset' : ` · rest ${restLabel(p.restSec)}`}` : 'Extra exercise';
+    // Once logging starts, progress replaces the prescription (it is in the open card anyway).
+    const folded = complete ? summary(b) : doneCount ? `${doneCount} of ${total} sets logged` : rxLine;
+    const [title, detail] = splitName(b.name);
+    const withDetail = (line) => (detail ? `${detail} · ${line}` : line);
     const head = h('div', { class: 'ex-head' },
       h('span', { class: `ex-no ${complete ? 'done' : ''}` }, complete ? icon('check', 16) : index + 1),
-      h('button', { class: 'ex-title', 'aria-expanded': String(expanded), onclick: () => { open = !expanded; draw(); } },
-        h('span', { class: 'h3' }, b.name),
-        h('span', { class: 'sub' }, !expanded ? (complete ? summary(b) : `${doneCount} of ${total} sets`) : `${cap(b.muscle)}${b.equip ? ` · ${b.equip}` : ''}${p ? '' : ' · extra'}`)),
+      // The whole row (name, detail line, arrow) is one button that opens and closes the sets.
+      h('button', { class: 'ex-title', 'aria-expanded': String(expanded), 'aria-controls': `ex-${index}`, 'aria-label': `${b.name}. ${expanded ? 'Close' : 'Open'} the sets`, onclick: toggle },
+        h('span', { class: 'ex-text' },
+          h('span', { class: 'h3' }, title),
+          h('span', { class: 'sub' }, withDetail(expanded ? `${cap(b.muscle)}${b.equip ? ` · ${b.equip}` : ''}${p ? '' : ' · extra'}` : folded))),
+      ),
       videoBtn(b),
-      h('button', { class: 'icon-btn', 'aria-label': `More for ${b.name}`, onclick: () => exerciseMenu(b, live) }, icon('dots', 20)));
-    if (!expanded) { el.replaceChildren(head); el.dataset.complete = 'true'; return; }
-    delete el.dataset.complete;
+      expanded ? h('button', { class: 'icon-btn', 'aria-label': `More for ${b.name}`, onclick: () => exerciseMenu(b, live) }, icon('dots', 20)) : null,
+      // The arrow always sits at the far right: points right when folded, down when open.
+      h('button', { class: `icon-btn ex-chev ${expanded ? 'open' : ''}`, 'aria-label': `${expanded ? 'Close' : 'Open'} ${b.name}`, 'aria-expanded': String(expanded), tabindex: '-1', onclick: toggle }, icon('chevR', 18)));
+    el.dataset.open = String(expanded);
+    if (complete) el.dataset.complete = 'true'; else delete el.dataset.complete;
+    if (!expanded) { el.replaceChildren(head); return; }
 
     const v = next();
     const targetLine = b.target
       ? h('p', { class: 'target' }, h('b', {}, `${CHANGE[b.target.change]}: ${amount(b, b.target.weightKg, b.target.reps)}`), h('span', { class: 'sub' }, ` · last time ${b.last.sets.map((s) => (isBodyweight(b) || s.weightKg === 0 ? s.reps : `${fmt1(s.weightKg)}×${s.reps}`)).join(', ')}`))
       : b.last ? h('p', { class: 'target sub' }, `Last time (${fmtDate(b.last.date, { day: 'numeric', month: 'short' })}): ${b.last.sets.map((s) => amount(b, s.weightKg, s.reps)).join(', ')}`)
-        : p && !isBodyweight(b) ? h('p', { class: 'target sub' }, `First time: pick a weight where rep ${p.repMax} is hard but clean${p.rir ? `, with ${p.rir} more in the tank` : ''}.`) : null;
+        : p && !isBodyweight(b) && !doneCount ? h('p', { class: 'target sub' }, `First time: pick a weight where rep ${p.repMax} is hard but clean${p.rir ? `, with ${p.rir} more in the tank` : ''}.`) : null;
 
     const rows = [];
     for (let s = 1; s <= total; s++) {
@@ -381,6 +437,7 @@ function exerciseCard(b, index, live) {
     }
     el.replaceChildren(
       head,
+      h('div', { class: 'ex-body', id: `ex-${index}` },
       p ? h('div', { class: 'rx', role: 'list' },
         h('button', { class: 'rxc', role: 'listitem', onclick: guideSheet }, `${p.repMin}–${p.repMax}${b.timed ? ' sec' : ' reps'}`),
         p.rir !== null ? h('button', { class: 'rxc', role: 'listitem', onclick: guideSheet }, `RIR ${p.rir}`) : null,
@@ -391,7 +448,7 @@ function exerciseCard(b, index, live) {
       h('div', { class: 'srows' }, rows),
       h('div', { class: 'ex-foot' },
         h('button', { class: 'textbtn', onclick: () => { extra++; draw(); } }, icon('plus', 18), 'Add a set'),
-        !complete && b.plan && doneCount < b.plan.sets ? h('button', { class: 'btn small ghost', onclick: doneAsPlanned }, doneCount ? 'Finish as planned' : 'Done as planned') : null));
+        !complete && b.plan && doneCount < b.plan.sets ? h('button', { class: 'btn small ghost', onclick: doneAsPlanned }, doneCount ? 'Finish as planned' : 'Done as planned') : null)));
   };
   draw();
   return el;
@@ -425,11 +482,28 @@ function sessionSheet(live) {
       h('div', {}, h('b', {}, sets), h('span', {}, 'sets')),
       h('div', {}, h('b', {}, volume >= 1000 ? `${fmt1(volume / 1000)} t` : `${fmt(volume)}`), h('span', {}, volume >= 1000 ? 'lifted' : 'kg lifted')),
       h('div', {}, h('b', {}, live.prs), h('span', {}, live.prs === 1 ? 'record' : 'records'))),
-    h('p', { class: 'sub' }, checked ? 'Training points: 30 of 30 for today.' : 'Training points: 15 of 30. Check in at the gym for the other 15.'),
+    h('p', { class: 'sub' }, checked ? 'Checked in: 30 training points for today.' : 'Your 30 training points come from the gym check-in. Send a photo before you leave.'),
     checked ? null : h('button', { class: 'btn block', onclick: (e) => { close(); capture(ctx, null); } }, icon('camera', 20), 'Check in now'),
     h('button', { class: `btn ${checked ? '' : 'ghost'} block`, onclick: () => { close(); navigate('/group'); } }, 'See the crew')));
 }
-const summary = (b) => b.sets.length ? [...b.sets].sort((x, y) => x.setNo - y.setNo).map((s) => (isBodyweight(b) || s.weightKg === 0 ? `${s.reps}` : `${fmt1(s.weightKg)}×${s.reps}`)).join(' · ') : '';
+/**
+ * What was done, compactly: "4 × 10 at 22.5 kg" when every set is the same, otherwise runs of
+ * identical sets ("2 × 10 at 22.5 kg · 8 at 25 kg"). Bodyweight: "3 × 12 reps"; timed: "3 × 30 sec".
+ */
+function summary(b) {
+  if (!b.sets.length) return '';
+  const unit = b.timed ? ' sec' : ' reps';
+  const one = (n, s) => (isBodyweight(b) || s.weightKg === 0 ? `${n > 1 ? `${n} × ` : ''}${s.reps}${unit}` : `${n > 1 ? `${n} × ` : ''}${s.reps} at ${fmt1(s.weightKg)} kg`);
+  const runs = [];
+  for (const s of [...b.sets].sort((x, y) => x.setNo - y.setNo)) {
+    const last = runs.at(-1);
+    if (last && last.s.weightKg === s.weightKg && last.s.reps === s.reps) last.n++; else runs.push({ s, n: 1 });
+  }
+  return runs.map((r) => one(r.n, r.s)).join(' · ');
+}
+
+/** "Incline dumbbell press (15–30°)" -> ["Incline dumbbell press", "15–30°"]: the detail goes on the grey line. */
+const splitName = (name) => { const m = /^(.*?)\s*\(([^()]+)\)\s*$/.exec(name); return m ? [m[1], m[2]] : [name, '']; };
 
 /** Weight and reps stepper for one set. onSave(setNo, kg, reps) */
 function setSheet(b, setNo, start, onSave, title = null, onRemove = null) {
@@ -544,8 +618,14 @@ function cardioSheet(ctx) {
 
 function restCard(d, ctx) {
   const next = d.week.find((x) => x.date > ctx.date && x.planned);
+  // Rest days earn the 30 training points up to the plan's rest days per week (see restAllowance).
+  const r = d.rest;
+  const points = !r ? null : r.counts
+    ? h('p', { class: 'meta', style: 'margin-top:8px' }, `Log your planned food today and this rest day earns the 30 training points (rest day ${r.used} of ${r.allowed} this week).`)
+    : h('p', { class: 'notice', style: 'margin-top:8px' }, `Extra rest day: your plan has ${r.allowed} a week, so today earns no training points. Train today and check in, or train on a rest day later this week.`);
   return h('section', { class: 'section' },
     h('p', { class: 'sub' }, 'Recovery is where you grow. Walk, sleep 7–9 hours, hit your protein.'),
+    points,
     next ? h('p', { style: 'margin:12px 0 14px' }, h('span', { class: 'sub' }, 'Next session '), h('b', {}, `${next.name}, ${next.date === shiftDate(ctx.today, 1) ? 'tomorrow' : fmtDate(next.date, { weekday: 'long' })}`)) : h('p', { style: 'height:12px' }));
 }
 

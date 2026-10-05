@@ -70,7 +70,8 @@ test('coach logs food and swaps an item through real routes', async (t) => {
   assert.match(out.reply, /tortilla/);
   assert.equal(out.actions.filter((a) => a.result?.error).length, 0, JSON.stringify(out.actions.map((a) => a.result?.error).filter(Boolean)));
   const after = await runTool(app.db, app.user, D, 'get_day', {});
-  assert.ok(after.otherFood.some((o) => o.name === 'Brown toast'), 'toast logged');
+  // Logged as an extra or, when brown toast is on the plan, as that planned item (2 slices, ~150 kcal).
+  assert.ok(Math.abs(after.eaten.kcal - 151) <= 15, `toast logged (${after.eaten.kcal} kcal)`);
   assert.ok(after.meals.flatMap((m) => m.items).some((i) => i.foodId === 'tortilla'), 'plan swapped');
   // the model was given the tools and a system prompt with the person's targets
   assert.ok(model.seen[0].tools.some((x) => x.function.name === 'swap_item'));
@@ -147,4 +148,55 @@ test('coach action labels for amount and whole-meal changes', async () => {
   assert.equal(actionLabel({ tool: 'ate_amount', args: { ref: '0-0-0' }, result: { ok: true } }, foods), 'Logged a different amount');
   assert.equal(actionLabel({ tool: 'swap_meal', args: { scope: 'today' }, result: { ok: true, title: 'Chicken wrap' } }, foods), 'Meal changed to Chicken wrap (today)');
   assert.equal(actionLabel({ tool: 'swap_meal', args: { scope: 'reset' }, result: { ok: true } }, foods), 'Put the planned meal back');
+});
+
+test('model benchmark tries the featured NVIDIA models first and unavailable ones last', async () => {
+  const { benchOrder } = await import('../src/api.js');
+  const ids = ['mistralai/mistral-large', 'openai/gpt-oss-20b', 'moonshotai/kimi-k3', 'nvidia/nemotron-3-ultra-550b-a55b', 'deepseek-ai/deepseek-v4-pro-0813', 'nvidia/nemotron-3.5-lightning-30b-a3b', 'moonshotai/kimi-k2.6'];
+  const order = benchOrder(ids, new Set(['moonshotai/kimi-k2.6', 'mistralai/mistral-large']));
+  assert.deepEqual(order.slice(0, 5), ['nvidia/nemotron-3.5-lightning-30b-a3b', 'deepseek-ai/deepseek-v4-pro-0813', 'moonshotai/kimi-k3', 'nvidia/nemotron-3-ultra-550b-a55b', 'openai/gpt-oss-20b']);
+  assert.deepEqual(order.slice(-2).sort(), ['mistralai/mistral-large', 'moonshotai/kimi-k2.6']);
+});
+
+test('tool calls written as text (Kimi, DeepSeek, Hermes formats) still run', async (t) => {
+  const { textToolCalls } = await import('../src/tool-calls.js');
+  const names = new Set(['log_foods', 'get_day']);
+  const args = JSON.stringify({ meal: 'breakfast', items: [{ foodId: 'eggs', qty: 2, unit: 'egg' }] });
+  const formats = [
+    `<tool_call>{"name": "log_foods", "arguments": ${args}}</tool_call>`,
+    `<|tool_calls_section_begin|><|tool_call_begin|>functions.log_foods:0<|tool_call_argument_begin|>${args}<|tool_call_end|>`,
+    `<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>log_foods\n\`\`\`json\n${args}\n\`\`\`<｜tool▁call▁end｜>`,
+    `\`\`\`json\n{"name":"log_foods","arguments":${JSON.stringify(args)}}\n\`\`\``,
+  ];
+  for (const f of formats) {
+    const calls = textToolCalls(f, names);
+    assert.equal(calls.length, 1, f.slice(0, 40));
+    assert.equal(JSON.parse(calls[0].function.arguments).meal, 'breakfast');
+  }
+  assert.equal(textToolCalls('I will log_foods for you, here is a summary of your meal {"x":1}', names).length, 0, 'a sentence is not a call');
+  assert.equal(textToolCalls('{"name": "delete_everything", "arguments": {}}', names).length, 0, 'only offered tools');
+
+  // End to end: a model that writes Kimi-style text still logs the food.
+  const app = await setup(); t.after(app.close);
+  const steps = [
+    { role: 'assistant', content: `<|tool_calls_section_begin|><|tool_call_begin|>functions.log_foods:0<|tool_call_argument_begin|>${JSON.stringify({ meal: 'breakfast', items: [{ foodId: 'tea-sugar', qty: 1, unit: 'cup' }] })}<|tool_call_end|><|tool_calls_section_end|>` },
+    { role: 'assistant', content: 'Logged a tea with breakfast.' },
+  ];
+  let i = 0;
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: steps[i++] }] }) });
+  const out = await coachTurn({ db: app.db, user: app.user, text: 'I had a tea with sugar for breakfast', today: D, env, fetchImpl });
+  assert.equal(out.actions[0]?.tool, 'log_foods');
+  const day = await runTool(app.db, app.user, D, 'get_day', {});
+  assert.ok(day.meals[0].added.some((x) => x.food === 'Tea with 2 tsp sugar'));
+});
+
+test('model benchmark judges answers the way the app would log them', async () => {
+  const { benchProblem } = await import('../src/api.js');
+  const foods = loadFoods(openDb(':memory:'), { offplan: true });
+  const good = { meal: 'breakfast', items: [{ foodId: 'baladi-bread', grams: 100 }, { foodId: 'eggs-scrambled', qty: 2, unit: 'eggs' }, { foodId: 'cheddar', qty: 10, unit: 'gm' }, { foodId: 'nescafe-3in1', qty: 1, unit: 'sachet' }, { foodId: 'milk', qty: 100, unit: 'ml' }] };
+  assert.equal(benchProblem(good, foods), null);
+  assert.equal(benchProblem({ ...good, items: good.items.map((x) => (x.foodId === 'milk' ? { name: 'milk', grams: 100 } : x)) }, foods), null, 'a name instead of an id is fine');
+  assert.match(benchProblem({ ...good, meal: 'lunch' }, foods), /meal/);
+  assert.match(benchProblem({ ...good, items: good.items.map((x) => (x.foodId === 'eggs-scrambled' ? { foodId: 'eggs-scrambled', qty: 2, unit: 'g' } : x)) }, foods), /2 eggs logged as 2 g/);
+  assert.match(benchProblem({ ...good, items: good.items.slice(0, 3) }, foods), /missed 1 Nescafé sachet/);
 });

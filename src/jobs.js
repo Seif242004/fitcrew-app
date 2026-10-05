@@ -124,11 +124,19 @@ async function weekly(db, user, date) {
   const { recap: r } = await callAs(db, user, 'GET', `/api/recap?today=${date}`);
   if (!r) return null;
   const first = user.name.split(' ')[0];
+  // The adaptive weekly check-in opens today: point to it (it needs this morning's weigh-in).
+  let ci = null;
+  try { ({ checkin: ci } = await callAs(db, user, 'GET', `/api/checkin/weekly?today=${date}`)); } catch { /* no check-in: skip the line */ }
+  const ciLine = !ci || ci.status === 'off' || ci.status === 'closed' ? ''
+    : ci.kind === 'needs_weight' ? 'Weigh in and open Today for your weekly check-in.'
+      : ci.kind === 'proposed' && ci.status === 'open' ? `Weekly check-in: ${ci.text} Open Today to update your plan.`
+        : ci.kind === 'learning' ? '' : `Weekly check-in: ${ci.text}`;
   const lines = [
     `${fmt(r.points)} points this week (${r.avg} a day), #${r.rank} of ${r.of} in the crew.`,
     `${r.days70} day${r.days70 === 1 ? '' : 's'} at 70+${r.gym.planned ? `, gym ${r.gym.attended} of ${r.gym.planned}` : ''}.`,
     r.bestLift ? `Best lift: ${r.bestLift.name}, ${r.bestLift.weightKg > 0 ? `${r.bestLift.weightKg} kg × ${r.bestLift.reps}` : `${r.bestLift.reps} reps`}${r.prs ? ` · ${r.prs} new PR${r.prs > 1 ? 's' : ''}` : ''}.` : '',
     r.weightChange !== null ? `Weight ${r.weightChange > 0 ? '+' : ''}${r.weightChange} kg.` : 'Weigh in this morning to see your trend.',
+    ciLine,
     r.tip,
   ].filter(Boolean);
   return { text: `Your week, ${first}:\n${lines.map((l) => `• ${l}`).join('\n')}`, push: { title: 'Your week', body: `${fmt(r.points)} points · #${r.rank} of ${r.of}`, url: '/#/today', tag: 'weekly' } };

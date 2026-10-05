@@ -206,9 +206,10 @@ export function registerSocial(c) {
   const PART_TIP = {
     calories: 'Calories were the weak spot. Log meals as you eat them and use "Rebalance" when a meal runs big.',
     protein: 'Protein was the weak spot. Never skip the protein item; swap it instead.',
-    meals: 'Plenty of planned items were missed. Swap what you do not like instead of skipping it.',
+    meals: 'Meals were often far from their plan. Eat each meal close to its plan (or swap what you do not like) instead of skipping or doubling it.',
     logging: 'Logging late cost points. A quick "I ate my lunch" to the coach counts.',
-    workout: 'Training points were the weak spot. Check in at the gym and tick your sets as you go.',
+    workout: 'Training points were the weak spot. Check in at the gym on training days: the photo is all 30 points, whatever you train.',
+    over: 'Going over your calories cost points this week. Log extras into their meal as you have them, and tap Rebalance when a meal runs big.',
   };
   function recap(db, uid, today) {
     const ws = weekStart(today);
@@ -222,7 +223,8 @@ export function registerSocial(c) {
     if (!me.points && !sets.length) return null; // nothing logged all week: no recap to show
     const visible = competing(all).filter((r) => !r.hidden || r.userId === uid);
     const parts = Object.keys(PART_MAX).map((k) => ({ part: k, avg: me.scores.reduce((a, s) => a + (s.parts[k] ?? 0), 0) / me.scores.length }));
-    const weakest = parts.filter((p) => p.avg < PART_MAX[p.part] * 0.85).sort((a, b) => a.avg / PART_MAX[a.part] - b.avg / PART_MAX[b.part])[0];
+    const overAvg = me.scores.reduce((a, s) => a + (s.parts.over ?? 0), 0) / me.scores.length;
+    const weakest = overAvg <= -5 ? { part: 'over' } : parts.filter((p) => p.avg < PART_MAX[p.part] * 0.85).sort((a, b) => a.avg / PART_MAX[a.part] - b.avg / PART_MAX[b.part])[0];
     const best = sets.reduce((b, s) => (e1rm(s.weight_kg, s.reps) > (b?.score ?? 0) ? { name: s.name ?? s.exercise_id, weightKg: s.weight_kg, reps: s.reps, score: e1rm(s.weight_kg, s.reps) } : b), null);
     const prs = db.prepare("SELECT COUNT(*) n FROM activity WHERE user_id = ? AND kind = 'pr' AND created_at BETWEEN ? AND ?").get(uid, `${from} 00:00:00`, `${to} 23:59:59`).n;
     const w = db.prepare('SELECT date, weight_kg FROM body_metrics WHERE user_id = ? AND weight_kg IS NOT NULL AND date BETWEEN ? AND ? ORDER BY date').all(uid, addDaysStr(from, -3), to);

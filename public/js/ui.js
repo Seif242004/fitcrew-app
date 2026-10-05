@@ -138,23 +138,64 @@ export function exercisePicker(onPick) {
   return h('div', { class: 'stack' }, input, list);
 }
 
-/** Food search used by the swap and add-food sheets. onPick(food) */
-export function foodPicker(onPick) {
-  const list = h('div', {});
-  const input = h('input', { type: 'text', placeholder: 'Search foods (rice, chicken, ful…)', 'aria-label': 'Search foods', autocomplete: 'off' });
-  let t;
-  const run = async () => {
-    try {
-      const { foods } = await api('GET', `/api/foods?q=${encodeURIComponent(input.value.trim())}`);
-      list.replaceChildren(...(foods.length
-        ? foods.slice(0, 40).map((f) => h('button', { class: 'list-row', onclick: () => onPick(f) },
-            h('span', { class: 'grow' }, h('span', { class: 'strong' }, f.name), h('span', { class: 'sub' }, `${Math.round(f.kcal)} kcal · P ${f.p} · C ${f.c} · F ${f.f} per 100 g`))))
-        : [h('p', { class: 'muted pad' }, 'No match. Ask the admin to add this food.')]));
-    } catch (e) { list.replaceChildren(h('p', { class: 'error' }, e.message)); }
+/**
+ * Food search for the logging sheets and the admin plan editor. onPick(food)
+ *   offplan: also eating-out foods (pizza, sweets), shown after the plan's foods. Only for
+ *            logging what was eaten; never for swaps or building plans.
+ *   recent:  while the box is empty, show this person's recent "other foods"
+ *   noMatch: extra element shown when nothing matches (e.g. "Enter it myself")
+ * Answers can arrive out of order on a slow network, so only the newest search is ever shown.
+ */
+export function foodPicker(onPick, { offplan = false, recent = false, noMatch = null } = {}) {
+  const list = h('div', { class: 'fp-list', 'aria-live': 'polite' });
+  const input = h('input', {
+    type: 'search', enterkeyhint: 'search', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Search foods',
+    placeholder: offplan ? 'Eggs, koshari, coffee, juice, pizza, شاورما…' : 'Search foods (rice, chicken, ful…)',
+  });
+  const r1 = (n) => Math.round(n * 10) / 10;
+  // One line per food, in its natural unit when it has one: "1 slice · 285 kcal · P 12 C 36 F 10".
+  const line = (f) => {
+    const u = f.units?.find((x) => !x.grams);
+    const g = u ? u.g : 100;
+    const m = (k) => r1((f[k] * g) / 100);
+    return `${u ? `1 ${u.name}` : '100 g'} · ${Math.round((f.kcal * g) / 100)} kcal · P ${m('p')} C ${m('c')} F ${m('f')}`;
   };
-  input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 180); });
+  const row = (f) => h('button', { class: 'list-row', onclick: () => onPick(f) },
+    h('span', { class: 'grow' }, h('span', { class: 'strong' }, f.name), h('span', { class: 'sub' }, line(f))));
+  const group = (title, foods) => [h('p', { class: 'fp-head' }, title), ...foods.map(row)];
+  const hint = h('p', { class: 'muted pad' }, offplan ? 'Type what you ate or drank: eggs, koshari, coffee, juice, pizza…' : 'Type a food: rice, chicken, ful…');
+
+  let seq = 0; let timer;
+  // Three kinds, in this order: diet foods, everyday drinks / sauces / bread (logging only), treats.
+  const show = (q, foods, popular = []) => {
+    if (!q) {
+      const parts = [...(foods.length ? group('Recent', foods) : []), ...(popular.length ? group('Drinks and quick adds', popular) : [])];
+      list.replaceChildren(...(parts.length ? parts : [hint]));
+      return;
+    }
+    if (!foods.length) { list.replaceChildren(h('p', { class: 'muted pad' }, `No food matches “${q}”.`), noMatch ?? h('p', { class: 'sub pad' }, 'Ask the admin to add it.')); return; }
+    const plan = foods.filter((f) => !f.offplan); const daily = foods.filter((f) => f.offplan && !f.treat); const treats = foods.filter((f) => f.treat);
+    list.replaceChildren(...(offplan && (daily.length || treats.length)
+      ? [...(plan.length ? group('Food list', plan) : []), ...(daily.length ? group('Drinks, sauces & bread', daily) : []), ...(treats.length ? group('Eating out & treats', treats) : [])]
+      : foods.map(row)));
+  };
+  const run = async () => {
+    const q = input.value.trim();
+    const mine = ++seq;
+    if (!q && !recent) { list.replaceChildren(hint); return; }
+    try {
+      const params = new URLSearchParams({ q });
+      if (offplan) params.set('offplan', '1');
+      if (recent) params.set('recent', '1');
+      if (!q && offplan) params.set('popular', '1');
+      const { foods, popular } = await api('GET', `/api/foods?${params}`);
+      if (mine === seq) show(q, foods, popular ?? []); // a newer search started meanwhile: drop this answer
+    } catch (e) { if (mine === seq) list.replaceChildren(h('p', { class: 'error' }, e.message)); }
+  };
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 150); });
+  input.addEventListener('search', () => { clearTimeout(timer); run(); }); // the clear (x) button and Enter
   run();
-  return h('div', { class: 'stack' }, input, list);
+  return h('div', { class: 'stack fp' }, input, list);
 }
 
 /**

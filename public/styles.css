@@ -515,6 +515,39 @@ details.section[open] > summary > svg { transform: rotate(90deg); }
 
 .ex { padding-bottom: var(--s2); }
 .ex[data-complete] { padding-bottom: var(--s1); }
+/* Exercises as one list of folded rows (train.js exerciseCard); the arrow opens the sets. */
+.exlist { padding-bottom: var(--s1); }
+.exlist .section-head { align-items: baseline; }
+.exlist-tip { margin: 2px 0 var(--s1); }
+.exlist .ex { border-top: 1px solid var(--hair); padding: 0; }
+.exlist .ex[data-open="true"] { padding-bottom: var(--s3); }
+.exlist .ex-head { margin-bottom: 0; min-height: 60px; }
+.ex-title { display: flex; align-items: center; gap: var(--s2); }
+.ex-text { flex: 1; min-width: 0; }
+.ex-text .h3, .ex-text .sub { display: block; }
+.ex-text .sub { font-size: 13px; }
+.ex-chev svg { transition: transform 0.2s ease; color: var(--ink-3); }
+.icon-btn.ex-chev { width: 32px; min-width: 32px; margin-right: -6px; }
+.ex-chev.open svg { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .ex-chev svg { transition: none; } }
+.ex-body { padding-left: calc(28px + var(--s2)); }
+/* Food search (ui.js foodPicker) */
+.fp-head { margin: var(--s3) 0 2px; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); }
+.fp-list .list-row .sub { font-variant-numeric: tabular-nums; }
+/* After logging an off-plan food (today.js afterSheet) */
+.after-head { display: flex; align-items: center; gap: var(--s3); }
+.after-head .ic { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; flex: none; background: var(--go-tint); color: var(--go); }
+.after-head .h3, .after-head .sub { display: block; }
+.after-choices { display: grid; gap: var(--s2); }
+.after-day { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s3); background: var(--sunken); border-radius: var(--r); padding: var(--s3) var(--s4); }
+.after-nums { white-space: nowrap; color: var(--ink-2); }
+.after-nums b { font: 600 24px/1 var(--num); color: var(--ink); }
+/* Rest / training day switch (train.js dayBar) */
+.daybar { display: grid; gap: var(--s2); margin-top: var(--s3); }
+.daybar .meta { margin: 0; }
+.daypick { display: flex; align-items: center; gap: var(--s2); }
+.daypick select { flex: 1; min-height: 44px; }
+.daybar-move { justify-self: start; min-height: 36px; margin-top: -4px; font-size: 15px; }
 .ex-head { display: flex; align-items: center; gap: var(--s2); min-height: 52px; margin-bottom: var(--s1); }
 .ex-no { width: 28px; height: 28px; flex: none; border-radius: 50%; display: grid; place-items: center; font: 600 16px/1 var(--num); background: var(--sunken); color: var(--ink-2); border: 1px solid var(--hair); }
 .ex-no.done { background: var(--go); color: var(--go-ink); border-color: var(--go); }
@@ -651,6 +684,35 @@ details.section[open] > summary > svg { transform: rotate(90deg); }
 .weigh-row { display: grid; grid-template-columns: 1fr auto; gap: var(--s2); }
 .weigh-row input { font: 600 22px/1 var(--num); }
 .recap-card .ic { background: var(--gold-tint); color: var(--gold); }
+/* Adaptive weekly check-in (public/js/checkin.js) */
+.wc-card .ic { background: var(--go-tint); color: var(--go); }
+.wc-card.wc-hold .ic { background: var(--gold-tint); color: var(--gold); }
+.wc-text { margin: 0; line-height: 1.5; }
+.wc-how { justify-self: start; min-height: 32px; font-size: 14px; }
+.wc-stats b { font-size: 22px; }
+.wc-stats span { display: block; margin-top: 4px; line-height: 1.25; }
+.wc-change { display: flex; justify-content: space-between; align-items: center; gap: var(--s3); background: var(--sunken); border-radius: var(--r); padding: var(--s3) var(--s4); }
+.wc-nums { display: flex; align-items: center; gap: 8px; font: 600 20px/1 var(--num); }
+.wc-nums s { color: var(--ink-3); font-weight: 500; }
+.wc-nums svg { color: var(--ink-3); flex: none; }
+.wc-nums b { font-size: 26px; }
+.wc-change.big .wc-nums b { font-size: 32px; }
+.wc-delta { font: 600 12px/1 var(--body); padding: 5px 8px; border-radius: 999px; border: 1px solid var(--hair-2); color: var(--ink-2); }
+.wc-actions { display: grid; grid-template-columns: 1fr 1.4fr; gap: var(--s2); }
+.wc-actions .btn { padding: 0 var(--s3); white-space: nowrap; }
+.wc-actions.one { grid-template-columns: 1fr; }
+.wc-badge { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; padding: 2px 8px; border-radius: 999px; background: var(--go-tint); color: var(--go); font-size: 12px; font-weight: 600; vertical-align: 1px; }
+.wc-progs { display: grid; gap: var(--s3); }
+.wc-prog-top { display: flex; justify-content: space-between; gap: var(--s2); font-size: 14px; color: var(--ink-2); margin-bottom: 6px; }
+.wc-prog-top b { color: var(--ink); font-family: var(--num); white-space: nowrap; }
+.wc-bar { height: 8px; border-radius: 4px; background: var(--sunken); overflow: hidden; }
+.wc-bar i { display: block; height: 100%; background: var(--go); border-radius: 4px; }
+.wc-row { cursor: default; display: grid; gap: 4px; min-height: 56px; padding-top: var(--s2); padding-bottom: var(--s2); }
+.wc-amt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 14px; color: var(--ink-2); }
+.wc-amt s { color: var(--ink-3); }
+.wc-amt b { color: var(--ink); }
+.wc-amt svg { color: var(--ink-3); }
+.wc-list { margin: 0; padding-left: 1.1em; display: grid; gap: var(--s2); line-height: 1.5; }
 .recap-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--s2); }
 .recap-stats div { background: var(--sunken); border-radius: var(--r); padding: var(--s3) var(--s2); text-align: center; }
 .recap-stats b { display: block; font: 600 26px/1 var(--num); }
@@ -978,3 +1040,43 @@ main.enter { animation: page-in 180ms cubic-bezier(0.16, 1, 0.3, 1); }
 .sheet-actions .act-row:focus-visible, .meal-opt:focus-visible, .swap-opt:focus-visible, .list-row:focus-visible, .item .rowbtn:focus-visible { outline-offset: -3px; border-radius: var(--r); }
 .amt-val:focus-within { box-shadow: 0 2px 0 var(--go); outline: 2px solid transparent; }
 .chip:focus-visible, .tab:focus-visible, .btn:focus-visible, .amt-btn:focus-visible, .icon-btn:focus-visible { outline-offset: 3px; }
+
+/* ---------- foods and drinks added to a meal (session 11) ---------- */
+.stack-sm > * + * { margin-top: var(--s2); }
+/* Added items: a small "+" disc instead of the plan's tick, so plan and extras read apart. */
+.item.extra .tick.added { width: 24px; height: 24px; background: var(--panel-2, var(--hair)); border: 1.5px dashed var(--hair-2); color: var(--ink-3); }
+.item.extra .item-name { color: var(--ink-2); }
+.item.extra .item-amt { color: var(--ink-3); }
+/* "+ Add food or drink" under each meal: quiet, full width, thumb height. */
+.add-row.meal-add { min-height: 44px; font-size: 15px; padding-top: var(--s1); }
+.add-only { padding-top: var(--s2); padding-bottom: var(--s2); }
+.add-only .add-row { min-height: 64px; align-items: center; }
+.add-only .add-row .grow { display: flex; flex-direction: column; }
+.add-only .add-row .strong { color: var(--go); }
+.add-only .add-row .sub { color: var(--ink-3); font-weight: 400; font-size: 14px; }
+/* Meal chooser in Add food and Move: chips that wrap (5 meals fit on two short rows at 390 px). */
+.meal-chips { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.meal-chips .chip[aria-checked="true"], .meal-chips .chip[aria-pressed="true"] { background: var(--ink); color: var(--canvas); border-color: var(--ink); }
+.meal-chips .chip[disabled] { opacity: 1; }
+button.foot-link { background: none; border: 0; padding: 0; font: inherit; cursor: pointer; min-height: 40px; }
+/* Points breakdown sheet */
+.pts-total { display: flex; align-items: baseline; gap: var(--s2); }
+.pts-total b { font: 700 40px var(--num); font-variant-numeric: tabular-nums; }
+.pts-total b.good { color: var(--go); }
+.pts-total span { color: var(--ink-2); }
+.pts-row { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) 0; border-bottom: 1px solid var(--hair); }
+.pts-row .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pts-row .sub { font-size: 14px; color: var(--ink-3); }
+.pts-val { font: 600 17px var(--num); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--ink-2); }
+.pts-val.full { color: var(--go); }
+.pts-val.neg { color: var(--bad); }
+/* Meal match: how close a meal's diet food is to its plan (the "meals matched" points). */
+.match-chip { display: inline-block; margin-left: var(--s2); padding: 0 8px; border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 20px; vertical-align: 1px; white-space: nowrap; color: var(--ink-2); background: var(--hair); font-variant-numeric: tabular-nums; }
+.match-chip.good { color: var(--go); background: var(--go-tint); }
+.match-chip.low { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.pts-meals { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.pts-meal { display: inline-flex; gap: 6px; align-items: baseline; padding: 6px 10px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--hair); font-size: 14px; color: var(--ink-2); }
+.pts-meal b { font: 600 15px var(--num); font-variant-numeric: tabular-nums; color: var(--ink); }
+.pts-meal.good b { color: var(--go); }
+.pts-meal.low b { color: var(--warn); }
+.pts-meal.none b { color: var(--ink-3); }

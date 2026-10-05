@@ -7,6 +7,7 @@ import { paint, loading, guard, onPull } from '../shell.js';
 import { navigate } from '../router.js';
 import { swapSheet, mealSheet } from '../swap.js';
 import { installCard } from '../install.js';
+import { checkinCard, resultSheet } from '../checkin.js';
 import { icon, sheet, toast, emptyState, field, numInput, foodPicker, seg, weekStrip as weekStripUI, celebrate, local, amountPicker } from '../ui.js';
 
 /*
@@ -26,21 +27,24 @@ export async function todayView() {
   // Extras that only matter when looking at today on your own account: streak, weigh-in, recap.
   const own = date === today && !state.as;
   const weekend = [5, 6, 0].includes(new Date().getDay()); // Friday to Sunday: the weekly recap shows
-  const extra = { streak: 0, metrics: null, recap: null };
+  const extra = { streak: 0, metrics: null, recap: null, checkin: null };
 
   const load = async () => {
-    const [day, train, adh, met, rec] = await Promise.all([
+    const [day, train, adh, met, rec, ci] = await Promise.all([
       api('GET', `/api/today?date=${date}`),
       api('GET', `/api/train?date=${date}`).catch(() => null),
       api('GET', `/api/adherence?days=14&today=${today}`).catch(() => ({ scores: [] })),
       own ? api('GET', '/api/metrics').catch(() => null) : null,
       own && weekend ? api('GET', `/api/recap?today=${today}`).catch(() => null) : null,
+      // Adaptive weekly check-in: opens Friday to Sunday; a proposed change stays until answered.
+      own ? api('GET', `/api/checkin/weekly?today=${today}`).catch(() => null) : null,
     ]);
     d = day; tr = train;
     scores = new Map(adh.scores.map((s) => [s.date, s]));
     extra.streak = adh.streak ?? 0;
     if (met) extra.metrics = met.metrics;
     if (rec) extra.recap = rec.recap;
+    extra.checkin = ci?.checkin ?? null;
   };
   const render = () => { main.replaceChildren(...build({ d, tr, scores, date, today, ui, act, extra })); maybeCelebrate(); };
 
@@ -66,7 +70,8 @@ export async function todayView() {
       if (!it.log || it.log.status === 'skipped') continue;
       for (const k of ['kcal', 'p', 'c', 'f']) sum[k] += it.log[k] ?? it[k];
     }
-    for (const e of d.extras) for (const k of ['kcal', 'p', 'c', 'f']) sum[k] += e[k] ?? 0;
+    // Extras count wherever they are: inside a meal or not placed yet.
+    for (const e of [...d.extras, ...d.meals.flatMap((m) => m.extras ?? [])]) for (const k of ['kcal', 'p', 'c', 'f']) sum[k] += e[k] ?? 0;
     d.consumed = sum;
   };
   const eatenLog = (it) => ({ status: 'eaten', foodId: it.foodId, name: it.name, grams: it.grams, kcal: it.kcal, p: it.p, c: it.c, f: it.f });
@@ -125,7 +130,10 @@ export async function todayView() {
       } catch (e) { toast(e.message, 'bad'); btn.disabled = false; }
     },
     ask: (text) => { try { sessionStorage.setItem('coachDraft', text); } catch { /* private mode: open the coach without a draft */ } navigate('/coach'); },
-    add: () => addSheet(date, today, async () => { await load(); render(); }),
+    // Add food or a drink to a meal (the meal's own "+ Add", or the one at the end of the day).
+    add: (mealIdx = null) => addSheet({ date, today, reload: async () => { await load(); render(); }, getDay: () => d, ask: act.ask, meal: mealIdx }),
+    extra: (e) => extraSheet(e, d, { date, onDone: async () => { await load(); render(); }, remove: () => act.removeExtra(e) }),
+    points: () => pointsSheet(scores.get(date) ?? d.score, d, date === today),
     weigh: async (kg) => {
       const prev = extra.metrics?.filter((m) => m.weightKg).at(-1);
       await api('POST', '/api/metrics', { date: today, weightKg: kg });
@@ -133,10 +141,27 @@ export async function todayView() {
       render();
       const diff = prev ? Math.round((kg - prev.weightKg) * 10) / 10 : null;
       toast(diff === null ? 'Weight saved' : `Weight saved · ${diff > 0 ? '+' : ''}${diff} kg since ${fmtDate(prev.date, { day: 'numeric', month: 'short' })}`);
+      // A Friday weigh-in is what the weekly check-in waits for: fetch it again.
+      if (extra.checkin) { try { extra.checkin = (await api('GET', `/api/checkin/weekly?today=${today}`)).checkin; render(); } catch { /* keep the card as it was */ } }
+    },
+    checkin: {
+      weigh: (kg) => act.weigh(kg),
+      dismiss: (week) => act.dismiss('ciSeen', week),
+      answer: async (answer, btn) => {
+        btn.disabled = true; btn.classList.add('busy');
+        try {
+          const r = await api('POST', '/api/checkin/weekly/answer', { today, answer });
+          extra.checkin = r.checkin;
+          if (answer === 'accept' && r.checkin.result) { await load(); render(); resultSheet(r.checkin.result); }
+          else { render(); if (answer === 'keep') toast('Kept your current plan. See you next Friday.'); }
+        } catch (e) { toast(e.message, 'bad'); btn.disabled = false; btn.classList.remove('busy'); }
+      },
     },
     dismiss: (key, value) => { local.set(key, value); render(); },
     removeExtra: async (e) => {
-      d.extras = d.extras.filter((x) => x !== e); recompute(); render();
+      d.extras = d.extras.filter((x) => x !== e);
+      for (const m of d.meals) m.extras = (m.extras ?? []).filter((x) => x !== e);
+      recompute(); render();
       try { await send('POST', '/api/log/remove', { date, ref: e.ref }); refreshSoon(); } catch (err) { toast(err.message, 'bad'); await load(); render(); }
     },
   };
@@ -179,18 +204,17 @@ function build({ d, tr, scores, date, today, ui, act, extra }) {
   // Food first: the numbers, then the meals with the next one to eat marked. Training, water
   // and the install tip come after, so the thing you open the app for is on the first screen.
   const next = date === today ? d.meals.findIndex((m) => m.items.some((i) => !i.log)) : -1;
-  // On a training day that is not finished yet, the session sits right under the numbers so it
-  // is never buried below five meals; otherwise it stays at the end.
-  const planned = tr?.blocks?.reduce((a, b) => a + (b.plan?.sets ?? 0), 0) ?? 0;
-  const trainingOpen = date === today && tr?.hasPlan && !tr.restDay && (tr.blocks.reduce((a, b) => a + b.sets.length, 0) < planned || tr.checkin?.status !== 'approved');
+  // On a training day without the gym check-in yet, the session sits right under the numbers so
+  // it is never buried below five meals; otherwise it stays at the end.
+  const trainingOpen = date === today && tr?.hasPlan && !tr.restDay && tr.checkin?.status !== 'approved'; // until the check-in is in
   return [
     ...head,
-    summaryCard(d, scores.get(date)),
+    summaryCard(d, scores.get(date), act),
     dayDoneCard(scores.get(date), date === today, extra),
     trainingOpen ? workoutRow(tr, true) : null,
     overBanner(d, act),
     // The weigh-in prompt sits after the next meal, so food stays the first thing on screen.
-    ...d.meals.flatMap((m, i) => [mealPanel(m, i, ui, act, i === next), i === Math.max(next, 0) ? [weighInCard(extra, today, act), recapCard(extra.recap, act)] : null]),
+    ...d.meals.flatMap((m, i) => [mealPanel(m, i, ui, act, i === next, (scores.get(date) ?? d.score)?.meals?.[i]?.match ?? null), i === Math.max(next, 0) ? [checkinOrWeighIn(extra, today, act), recapCard(extra.recap, act)] : null]),
     extrasPanel(d.extras, act),
     askBar(act),
     trainingOpen ? null : workoutRow(tr, date === today),
@@ -208,6 +232,11 @@ function dayDoneCard(s, isToday, extra) {
       h('span', { class: 'strong' }, `${s.total} points${isToday ? ' today' : ''}`),
       h('span', { class: 'sub' }, isToday && extra.streak > 1 ? `${extra.streak}-day streak. Keep it going.` : isToday ? 'A 70+ day. Repeat tomorrow for a streak.' : 'A 70+ day, counted toward the month')),
     h('span', { class: 'ic gold', 'aria-hidden': 'true' }, icon('trophy', 20)));
+}
+
+/** The weekly check-in card when there is one (it asks for the weigh-in itself), else the weigh-in prompt. */
+function checkinOrWeighIn(extra, today, act) {
+  return checkinCard(extra.checkin, act.checkin) ?? weighInCard(extra, today, act);
 }
 
 /**
@@ -285,7 +314,7 @@ function weekStrip(date, today, scores, act) {
 }
 
 /** Calorie ring (remaining in the centre) + three macro bars + score footer. */
-function summaryCard(d, s) {
+function summaryCard(d, s, act) {
   const t = d.targets; const c = d.consumed;
   const left = Math.round(t.kcal - c.kcal);
   const R = 56; const C = 2 * Math.PI * R; const pct = Math.min(1, c.kcal / t.kcal);
@@ -311,7 +340,8 @@ function summaryCard(d, s) {
         macro('Protein', 'p', c.p, t.proteinG), macro('Carbs', 'c', c.c, t.carbsG), macro('Fat', 'f', c.f, t.fatG))),
     h('div', { class: 'summary-foot' },
       h('span', {}, 'Eaten ', h('b', {}, fmt(c.kcal)), ` of ${fmt(t.kcal)} kcal`),
-      score !== null && score !== undefined ? h('a', { href: '#/progress', class: 'foot-link' }, 'Score ', h('b', { class: score >= 70 ? 'good' : '' }, score), icon('chevR', 16)) : h('a', { href: '#/progress', class: 'foot-link' }, 'Progress', icon('chevR', 16))));
+      // The score opens what it is made of (and what would raise it), so points are never a mystery.
+      score !== null && score !== undefined ? h('button', { class: 'foot-link', type: 'button', onclick: act.points, 'aria-label': `Score ${score}. See how today's points add up` }, 'Score ', h('b', { class: score >= 70 ? 'good' : '' }, score), icon('chevR', 16)) : h('a', { href: '#/progress', class: 'foot-link' }, 'Progress', icon('chevR', 16))));
 }
 
 /** Shown only when what is logged puts the day on course to go over by more than 5%. */
@@ -353,40 +383,50 @@ function waterCard(w, act) {
 
 function workoutRow(tr, isToday) {
   if (!tr || !tr.hasPlan) return null;
-  if (tr.restDay) {
-    return h('a', { class: 'strip', href: '#/train' }, h('span', { class: 'ico' }, icon('train', 22)),
-      h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Rest day'), h('span', { class: 'sub' }, 'Recovery counts. Cardio is optional.')), icon('chevR', 20));
-  }
-  const planned = tr.blocks.reduce((a, b) => a + (b.plan?.sets ?? 0), 0);
-  const logged = tr.blocks.reduce((a, b) => a + b.sets.length, 0);
-  const done = planned > 0 && logged >= planned;
   const ci = tr.checkin?.status;
-  const checkin = ci === 'approved' ? 'checked in' : ci === 'pending' ? 'check-in pending' : isToday ? 'check in at the gym' : 'no check-in';
-  return h('a', { class: `strip ${done && ci === 'approved' ? 'done' : ''}`, href: '#/train' }, h('span', { class: 'ico' }, icon(done && ci === 'approved' ? 'check' : 'train', 22)),
-    h('span', { class: 'grow' }, h('span', { class: 'h3' }, tr.dayName ?? 'Workout'),
-      h('span', { class: 'sub' }, `${logged ? `${logged} of ${planned} sets` : `${tr.blocks.length} exercises · ${planned} sets`} · ${checkin}`)),
-    h('span', { class: 'cta' }, done ? 'View' : logged ? 'Continue' : isToday ? 'Start' : 'Log'));
+  if (tr.restDay) {
+    // A rest day: earns the training points when the day is logged (within the plan's rest days).
+    const sub = ci === 'approved' ? (tr.state?.extraSession ? 'Extra session: +30 points and a +10 bonus' : 'Trained anyway and checked in: +30 points')
+      : tr.rest && !tr.rest.counts ? 'Extra rest day this week: no training points. Tap to train instead.'
+        : isToday ? (tr.extraBonus ? 'Recovery counts. Train anyway for a +10 bonus.' : 'Recovery counts. Training today? Tap to switch.') : 'Recovery counts.';
+    return h('a', { class: `strip ${ci === 'approved' ? 'done' : ''}`, href: '#/train' }, h('span', { class: 'ico' }, icon(ci === 'approved' ? 'check' : 'train', 22)),
+      h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Rest day'), h('span', { class: 'sub' }, sub)), icon('chevR', 20));
+  }
+  // A training day is done when the gym check-in is in: that is all 30 points. Sets are optional.
+  const logged = tr.blocks.reduce((a, b) => a + b.sets.length, 0);
+  const sub = ci === 'approved' ? `Checked in: +30 points${logged ? ` · ${logged} sets logged` : ''}`
+    : ci === 'pending' ? 'Check-in pending'
+      : isToday ? `${tr.blocks.length} exercises · check in at the gym for 30 points` : 'No check-in';
+  return h('a', { class: `strip ${ci === 'approved' ? 'done' : ''}`, href: '#/train' }, h('span', { class: 'ico' }, icon(ci === 'approved' ? 'check' : 'train', 22)),
+    h('span', { class: 'grow' }, h('span', { class: 'h3' }, tr.dayName ?? 'Workout'), h('span', { class: 'sub' }, sub)),
+    h('span', { class: 'cta' }, ci === 'approved' ? 'View' : isToday ? 'Check in' : 'View'));
 }
 
 /** A meal panel. Fully logged meals fold to one line; tap to review. */
-function mealPanel(m, idx, ui, act, isNext = false) {
-  const planned = m.items.reduce((a, i) => a + i.kcal, 0);
+function mealPanel(m, idx, ui, act, isNext = false, match = null) {
+  // The meal's numbers include what was added to it (the coffee with breakfast counts as breakfast).
+  const planned = m.items.reduce((a, i) => a + i.kcal, 0) + (m.extras ?? []).reduce((a, e) => a + e.kcal, 0);
   const handled = m.items.filter((i) => i.log).length;
   const complete = handled === m.items.length;
-  const eaten = m.items.filter((i) => i.log && i.log.status !== 'skipped').reduce((a, i) => a + (i.log.kcal ?? i.kcal), 0);
+  const extras = m.extras ?? [];
+  const eaten = m.items.filter((i) => i.log && i.log.status !== 'skipped').reduce((a, i) => a + (i.log.kcal ?? i.kcal), 0) + extras.reduce((a, e) => a + e.kcal, 0);
   const titleBlock = h('span', { class: 'grow' }, h('span', { class: 'h3' }, m.name, isNext ? h('span', { class: 'next-chip' }, 'Up next') : null),
     h('span', { class: 'sub' }, complete ? `Done · ${fmt(eaten)} kcal` : m.title ?? `${m.items.length} items`,
-      m.mealSwappedFrom && !complete ? h('span', { class: 'changed-chip' }, 'Today only') : null));
-  const rows = m.items.map((it) => itemRow(it, idx, act));
+      m.mealSwappedFrom && !complete ? h('span', { class: 'changed-chip' }, 'Today only') : null,
+      // How close what was eaten is to this meal's plan (the meal-match points), once anything is logged.
+      match !== null ? h('span', { class: `match-chip ${match >= 90 ? 'good' : match < 50 ? 'low' : ''}`, title: 'How close this meal is to its plan: calories, protein, carbs, fat' }, `${match}% match`) : null));
+  const rows = [...m.items.map((it) => itemRow(it, idx, act)), ...extras.map((e) => extraRow(e, act))];
+  // Add food or a drink to this meal: coffee with breakfast, a juice with lunch.
+  const addHere = h('button', { class: 'add-row meal-add', type: 'button', onclick: () => act.add(idx), 'aria-label': `Add food or a drink to ${m.name.toLowerCase()}` }, icon('plus', 18), 'Add food or drink');
   if (complete && !ui.open.has(idx)) {
     return h('details', { class: 'section meal', ontoggle: (e) => { if (e.currentTarget.open) ui.open.add(idx); else ui.open.delete(idx); } },
       h('summary', { class: 'meal-head', 'aria-label': `${m.name}, all logged, ${fmt(eaten)} kcal. Show items` },
         h('span', { class: 'tick', style: 'background:var(--go);border-color:var(--go);color:var(--go-ink)' }, icon('check', 14)), titleBlock, h('span', { class: 'chev' }, icon('chevR', 18))),
-      ...rows);
+      ...rows, addHere);
   }
   // Number-first card: "Meal 2 · Lunch" with the calories big on the right, the meal's macros under
   // it, the items, then "Change meal" and "Log all" at the foot where the thumb is.
-  const sum = (k) => Math.round(m.items.reduce((a, i) => a + (i[k] ?? 0), 0));
+  const sum = (k) => Math.round([...m.items, ...extras].reduce((a, i) => a + (i[k] ?? 0), 0));
   return h('section', { class: `section${isNext ? ' meal-next' : ''}` },
     h('div', { class: 'meal-head' },
       h('span', { class: 'grow' }, h('span', { class: 'meal-eyebrow' }, `Meal ${idx + 1}`), titleBlock.firstChild, titleBlock.lastChild),
@@ -396,6 +436,7 @@ function mealPanel(m, idx, ui, act, isNext = false) {
       h('span', {}, h('i', { style: 'background:var(--carbs)' }), 'C ', h('b', {}, sum('c')), 'g'),
       h('span', {}, h('i', { style: 'background:var(--fat)' }), 'F ', h('b', {}, sum('f')), 'g')),
     ...rows,
+    addHere,
     complete ? null : h('div', { class: 'meal-foot' },
       h('button', { class: 'swap-link', onclick: () => act.changeMeal(idx), 'aria-label': `Change ${m.name.toLowerCase()} for another meal` }, icon('swap', 16), 'Change meal'),
       h('button', { class: 'btn small', onclick: (e) => { e.currentTarget.disabled = true; act.logAll(idx); } }, icon('check', 16), 'Log all')));
@@ -426,15 +467,84 @@ function itemRow(it, mealIdx, act) {
     h('button', { class: 'more', 'aria-label': `More options for ${it.name}`, onclick: () => act.options(it, act) }, icon('dots', 20)));
 }
 
+/** An added food or drink inside a meal (or not placed yet): ⋯ moves it to another meal or removes it. */
+function extraRow(e, act) {
+  return h('div', { class: 'item extra', 'data-state': 'eaten' },
+    h('button', { class: 'rowbtn', type: 'button', onclick: () => act.extra(e), 'aria-label': `${e.name}, ${e.amount ?? 'custom entry'}, ${fmt(e.kcal)} kcal, added. Move or remove` },
+      h('span', { class: 'tick added', 'aria-hidden': 'true' }, icon('plus', 12)),
+      h('span', { class: 'item-main', style: 'padding:0;min-height:0' },
+        h('span', { class: 'name-row' }, h('span', { class: 'item-name' }, shortName(e.name))),
+        h('span', { class: 'item-amt' }, `${e.amount ?? (e.grams ? `${e.grams} g` : 'Custom entry')} · ${e.offplan ? 'logging only' : 'added'}`)),
+      h('span', { class: 'item-kcal' }, fmt(e.kcal))),
+    h('button', { class: 'more', type: 'button', 'aria-label': `Move or remove ${e.name}`, onclick: () => act.extra(e) }, icon('dots', 20)));
+}
+
+/**
+ * The end of the day's list. Foods logged before meals existed for extras (or without a meal) sit
+ * here with a one-tap move into a meal; otherwise it is only the "Add food or drink" button.
+ */
 function extrasPanel(extras, act) {
+  if (!extras.length) {
+    return h('section', { class: 'section add-only' },
+      h('button', { class: 'add-row', type: 'button', onclick: () => act.add() }, icon('plus', 20),
+        h('span', { class: 'grow' }, h('span', { class: 'strong' }, 'Add food or drink'), h('span', { class: 'sub' }, 'Coffee, juice, a snack, eating out. It goes into the meal you pick.'))));
+  }
   return h('section', { class: 'section' },
-    h('div', { class: 'meal-head' }, h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Other food'),
-      h('span', { class: 'sub' }, extras.length ? `${fmt(extras.reduce((a, e) => a + e.kcal, 0))} kcal outside the plan` : 'Anything you ate that is not in the plan'))),
-    ...extras.map((e) => h('div', { class: 'item', 'data-state': 'eaten' },
-      h('span', { class: 'item-main' }, h('span', { class: 'item-name', style: 'color:var(--ink)' }, e.name), h('span', { class: 'item-amt' }, e.amount ?? (e.grams ? `${e.grams} g` : 'Custom entry'))),
-      h('span', { class: 'item-kcal' }, fmt(e.kcal)),
-      h('button', { class: 'more', 'aria-label': `Remove ${e.name}`, onclick: () => act.removeExtra(e) }, icon('trash', 18)))),
-    h('button', { class: 'add-row', onclick: act.add }, icon('plus', 20), 'Add food'));
+    h('div', { class: 'meal-head' }, h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Not in a meal yet'),
+      h('span', { class: 'sub' }, `${fmt(extras.reduce((a, e) => a + e.kcal, 0))} kcal · tap one to put it in the meal you had it with`))),
+    ...extras.map((e) => extraRow(e, act)),
+    h('button', { class: 'add-row', type: 'button', onclick: () => act.add() }, icon('plus', 20), 'Add food or drink'));
+}
+
+/** Move an added food to the meal it belongs to, or remove it. */
+function extraSheet(e, d, { date, onDone, remove }) {
+  sheet(shortName(e.name), (close) => {
+    const move = async (mi, btn) => {
+      btn.disabled = true;
+      try { await send('POST', '/api/log/meal', { date, ref: e.ref, meal: mi }); close(); toast(`Moved to ${d.meals[mi].name.toLowerCase()}`); await onDone(); } catch (err) { toast(err.message, 'bad'); btn.disabled = false; }
+    };
+    return h('div', { class: 'stack-lg' },
+      h('div', { class: 'stack' },
+        h('p', { class: 'eyebrow' }, `${e.amount ?? 'Custom entry'} · ${fmt(e.kcal)} kcal`),
+        h('p', { class: 'sub' }, e.offplan ? 'Logging only: it counts toward today\'s calories, but only planned food earns points.' : 'Added on top of your plan: it counts toward today\'s calories, but only planned food earns points.')),
+      h('div', { class: 'stack' }, h('p', { class: 'h3' }, e.meal === null ? 'Which meal was it with?' : 'Move to another meal'),
+        h('div', { class: 'meal-chips', role: 'group', 'aria-label': 'Meals' }, d.meals.map((m, mi) => h('button', {
+          type: 'button', class: 'chip', 'aria-pressed': String(e.meal === mi), disabled: e.meal === mi ? true : null, onclick: (ev) => move(mi, ev.currentTarget),
+        }, m.name)))),
+      h('div', { class: 'sheet-actions' },
+        h('button', { class: 'act-row', type: 'button', onclick: () => { close(); remove(); } }, h('span', { class: 'ico' }, icon('trash', 20)), h('span', { class: 'grow' }, h('span', { class: 'strong' }, 'Remove it')), null)));
+  });
+}
+
+/** Today's points, part by part, with the rule behind each and what would raise it. */
+function pointsSheet(s, d, isToday) {
+  if (!s?.parts) return;
+  const p = s.parts;
+  const goal = state.me?.profile?.goal;
+  const rows = [
+    ['Calories', p.calories, 20, 'From diet food: within 10% of your target is full marks.'],
+    ['Protein', p.protein, 20, 'From diet food: 90% of your protein target or more.'],
+    ['Meals matched', p.meals, 20, 'Each meal\'s diet food vs its plan (calories, protein, carbs, fat). Within 10% is full marks; bigger meals count more.'],
+    ['Logged on the day', p.logging, 10, 'Logging the same day you eat.'],
+    p.workout !== undefined ? ['Training', p.workout, 30, 'Gym check-in on training days; rest days count when the day is logged.'] : null,
+    p.bonus ? ['Extra session', p.bonus, 10, 'Trained on a planned rest day.'] : null,
+    p.over ? ['Over target', p.over, null, goal === 'maintain' ? 'Maintaining: more than 10% over your calories costs 1 point per % (all food counts).' : 'Cutting: more than 5% over your calories costs 1 point per % (all food counts).'] : null,
+  ].filter(Boolean);
+  // Logging-only food (pizza, coffee drinks, sauces) and custom entries: counted, never scored.
+  const extrasKcal = [...d.extras, ...d.meals.flatMap((m) => m.extras ?? [])].filter((e) => e.offplan || !e.foodId).reduce((a, e) => a + e.kcal, 0);
+  const matches = (s.meals ?? []).filter((m) => m.match !== null);
+  sheet(isToday ? 'Today\'s points' : 'Points that day', () => h('div', { class: 'stack' },
+    h('div', { class: 'pts-total' }, h('b', { class: s.total >= 70 ? 'good' : '' }, s.total), h('span', {}, s.total >= 70 ? 'points · a 70+ day' : `points · ${70 - s.total} more for a 70+ day`)),
+    h('div', { class: 'pts-rows' }, rows.map(([label, got, max, why]) => h('div', { class: 'pts-row' },
+      h('span', { class: 'grow' }, h('span', { class: 'strong' }, label), h('span', { class: 'sub' }, why)),
+      h('span', { class: `pts-val ${got < 0 ? 'neg' : max && got >= max ? 'full' : ''}` }, max ? `${fmt(Math.round(got))}/${max}` : fmt(Math.round(got)))))),
+    // Each meal's match, so "meals matched 12/20" says which meal cost the points.
+    matches.length ? h('div', { class: 'pts-meals', 'aria-label': 'How close each meal was to its plan' }, (s.meals ?? []).map((m) => h('span', { class: `pts-meal ${m.match === null ? 'none' : m.match >= 90 ? 'good' : m.match < 50 ? 'low' : ''}` },
+      h('span', {}, m.name), h('b', {}, m.match === null ? '–' : `${m.match}%`)))) : null,
+    extrasKcal ? h('p', { class: 'notice' }, `${fmt(extrasKcal)} kcal today came from off-plan food or custom entries. It counts toward your calories, but earns no points.`) : null,
+    // Where the penalty starts, in kcal, so "going over" is a number and not a guess.
+    goal === 'cut' || goal === 'maintain' ? h('p', { class: 'sub' }, `Over ${fmt(Math.round(d.targets.kcal * (goal === 'cut' ? 1.05 : 1.1)))} kcal (all food counted), each 1% more costs a point.`) : null,
+    h('a', { class: 'btn ghost block', href: '#/progress' }, 'See your progress')));
 }
 
 /**
@@ -466,6 +576,7 @@ function itemSheet(it, date, today, reload) {
       else save({ status: 'adjusted', unit: v.unit, qty: v.qty }, `Logged ${v.label}`);
     });
     const swap = h('div', {});
+    // Ate something else instead of this item: any food, eating-out foods included (it is a log, not a swap).
     const pickSwap = () => swap.replaceChildren(foodPicker((f) => {
       const p = amountPicker({ units: f.units, grams: 0, per100: f });
       const add = h('button', { class: 'btn', onclick: () => { const v = p.value(); if (v.grams > 0) save({ status: 'swapped', foodId: f.id, unit: v.unit, qty: v.qty }, `Logged ${v.label}`); } }, 'Save');
@@ -473,7 +584,7 @@ function itemSheet(it, date, today, reload) {
         h('p', { class: 'item-name' }, f.name),
         p.el,
         h('div', { class: 'row-flex' }, add, h('button', { class: 'btn ghost', onclick: pickSwap }, 'Pick another'))));
-    }));
+    }, { offplan: true, recent: true }));
     return h('div', { class: 'stack-lg' },
       h('div', { class: 'stack' },
         h('p', { class: 'eyebrow' }, `Planned · ${it.amount ?? `${it.grams} g`} · ${fmt(it.kcal)} kcal`),
@@ -492,30 +603,132 @@ function itemSheet(it, date, today, reload) {
   });
 }
 
-function addSheet(date, today, reload) {
-  sheet('Add food', (close) => {
+/**
+ * Add food: search the food list and the eating-out foods (pizza, burgers, sweets), or enter it by
+ * hand. After something off-plan (or anything that pushes the day over), a short "what now" step
+ * follows: was it instead of a meal, and should the rest of today be trimmed.
+ */
+function addSheet({ date, today, reload, getDay, ask, meal = null }) {
+  const day = getDay();
+  // Which meal it goes in: the one it was opened from, else the next meal still to eat, else the last.
+  const next = day.meals.findIndex((m) => m.items.some((i) => !i.log));
+  let mealIdx = meal ?? (next >= 0 ? next : day.meals.length - 1);
+  sheet('Add food or drink', (close) => {
     const area = h('div', {});
-    const add = async (body, label) => {
-      try { await api('POST', '/api/log/extra', { date, today, ...body }); close(); toast(label ? `Added ${label}` : 'Added'); await reload(); } catch (e) { toast(e.message, 'bad'); }
+    const chips = h('div', { class: 'meal-chips', role: 'radiogroup', 'aria-label': 'Add it to' });
+    const drawChips = () => chips.replaceChildren(...day.meals.map((m, mi) => h('button', {
+      type: 'button', class: 'chip', role: 'radio', 'aria-checked': String(mi === mealIdx), onclick: () => { mealIdx = mi; drawChips(); },
+    }, m.name)));
+    drawChips();
+    const add = async (body, label, info) => {
+      try {
+        const name = day.meals[mealIdx]?.name;
+        await api('POST', '/api/log/extra', { date, today, meal: mealIdx, ...body });
+        close(); await reload();
+        const d = getDay();
+        const over = d && d.projectedKcal > d.targets.kcal * 1.05;
+        // Today only: suggestions about the rest of the day make no sense for a past day.
+        if (date === today && d?.planId && (info?.treat || over)) afterSheet({ label, kcal: info?.kcal, date, today, reload, getDay, meal: mealIdx, treat: info?.treat });
+        else toast(`Added ${label || 'it'} to ${name ? name.toLowerCase() : 'today'}`);
+      } catch (e) { toast(e.message, 'bad'); }
     };
-    // Pick a food, then say how much the way you would say it: 2 pieces of taameya, 1 plate of koshari.
+    const toCoach = h('div', { class: 'stack', style: 'margin-top:4px' },
+      h('button', { class: 'btn ghost block', onclick: () => { close(); ask(`For ${day.meals[mealIdx]?.name.toLowerCase() ?? 'today'} I had `); } }, icon('coach', 18), 'Describe it to the coach'),
+      h('p', { class: 'sub' }, 'The coach estimates it for you, or use “Enter it myself” above.'));
+    // Pick a food, then say how much the way you would say it: 2 slices, 1 plate of koshari, 1 cup.
     const showSearch = () => area.replaceChildren(foodPicker((f) => {
       const p = amountPicker({ units: f.units, grams: 0, per100: f });
-      area.replaceChildren(h('div', { class: 'stack' }, h('p', { class: 'h3' }, f.name), p.el,
+      area.replaceChildren(h('div', { class: 'stack' },
+        h('p', { class: 'h3' }, f.name),
+        f.offplan ? h('p', { class: 'sub' }, f.treat ? 'Eating out & treats · typical values · logging only' : 'Logging only · counts toward calories, earns no points') : null,
+        p.el,
         h('div', { class: 'row-flex' },
-          h('button', { class: 'btn', onclick: () => { const v = p.value(); if (v.grams > 0) add({ foodId: f.id, unit: v.unit, qty: v.qty }, v.label); } }, 'Add'),
+          h('button', { class: 'btn', onclick: () => { const v = p.value(); if (v.grams > 0) add({ foodId: f.id, unit: v.unit, qty: v.qty }, amountLabel(v.label, f.name), { treat: f.treat, kcal: Math.round((f.kcal * v.grams) / 100) }); } }, 'Add'),
           h('button', { class: 'btn ghost', onclick: showSearch }, 'Pick another'))));
-    }));
+    }, { offplan: true, recent: true, noMatch: toCoach }));
     const showCustom = () => {
       const f = { name: h('input', { type: 'text', 'aria-label': 'Name' }), kcal: numInput('', { min: 0 }), p: numInput('', { min: 0 }), c: numInput('', { min: 0 }), f: numInput('', { min: 0 }) };
       area.replaceChildren(h('div', { class: 'stack' },
         field('What did you eat?', f.name),
         h('div', { class: 'grid2' }, field('Calories', f.kcal), field('Protein (g)', f.p)),
         h('div', { class: 'grid2' }, field('Carbs (g)', f.c), field('Fat (g)', f.f)),
-        h('button', { class: 'btn', onclick: () => add({ name: f.name.value, kcal: Number(f.kcal.value), p: Number(f.p.value || 0), c: Number(f.c.value || 0), f: Number(f.f.value || 0) }) }, 'Add')));
+        h('button', { class: 'btn', onclick: () => add({ name: f.name.value, kcal: Number(f.kcal.value), p: Number(f.p.value || 0), c: Number(f.c.value || 0), f: Number(f.f.value || 0) }, f.name.value, { kcal: Number(f.kcal.value) }) }, 'Add')));
     };
-    const tabs = seg([['search', 'From the food list'], ['custom', 'Enter it myself']], 'search', (v) => (v === 'search' ? showSearch() : showCustom()), 'How to add');
+    const tabs = seg([['search', 'Search foods'], ['custom', 'Enter it myself']], 'search', (v) => (v === 'search' ? showSearch() : showCustom()), 'How to add');
     showSearch();
-    return h('div', { class: 'stack' }, tabs, area);
+    return h('div', { class: 'stack' }, h('div', { class: 'stack-sm' }, h('p', { class: 'eyebrow' }, 'Add it to'), chips), tabs, area);
   });
+}
+
+/**
+ * After an off-plan food: no guilt, just the next step. 1) Was it instead of a meal? Then that
+ * meal is marked skipped (honest, and the day adds up). 2) The day as it now stands, and if it
+ * is over, one tap trims the rest of today (the rebalance), or leave it: one day is fine.
+ */
+function afterSheet({ label, kcal, date, today, reload, getDay, meal = null, treat = false }) {
+  sheet('Logged', (close) => {
+    const body = h('div', { class: 'stack' });
+    // Meals with planned items still to eat; the meal it was added to first ("instead of lunch").
+    const mealsLeft = () => (getDay()?.meals ?? []).map((m, mi) => ({ m, mi, open: m.items.filter((it) => !it.log) })).filter((x) => x.open.length)
+      .sort((a, b) => (b.mi === meal) - (a.mi === meal));
+    const replaced = async (x, btn) => {
+      btn.disabled = true;
+      try {
+        for (const it of x.open) await send('POST', '/api/log', { date, today, ref: it.key, status: 'skipped' });
+        await reload(); dayStep(`${x.m.title ?? x.m.name} marked as skipped.`);
+      } catch (e) { toast(e.message, 'bad'); btn.disabled = false; }
+    };
+    const head = h('div', { class: 'after-head' }, h('span', { class: 'ic' }, icon('check', 22)),
+      h('span', {}, h('span', { class: 'h3' }, label ? cap(label) : 'Added'), kcal ? h('span', { class: 'sub' }, `${fmt(kcal)} kcal`) : null));
+    // Step 1: instead of a meal?
+    const mealStep = () => {
+      const left = mealsLeft();
+      if (!left.length || !treat) { dayStep(); return; } // "instead of a meal?" is for eating out and treats
+      body.replaceChildren(head,
+        h('p', { class: 'h3' }, 'Was it instead of a meal?'),
+        h('div', { class: 'after-choices' },
+          ...left.map((x) => h('button', { class: 'act-row', onclick: (e) => replaced(x, e.currentTarget) },
+            h('span', { class: 'grow' }, h('span', { class: 'strong' }, `Instead of ${x.m.name.toLowerCase()}`), x.m.title ? h('span', { class: 'sub' }, x.m.title) : null), icon('chevR', 18))),
+          h('button', { class: 'act-row', onclick: () => dayStep() }, h('span', { class: 'grow' }, h('span', { class: 'strong' }, 'No, on top of my plan')), icon('chevR', 18))));
+    };
+    // Step 2: where the day stands now, and the one useful action.
+    const dayStep = (note = null) => {
+      const d = getDay();
+      const target = d.targets.kcal; const proj = d.projectedKcal; const over = proj - target;
+      const fine = over <= target * 0.05;
+      const trim = h('button', { class: 'btn block', onclick: async () => {
+        trim.disabled = true; trim.classList.add('busy');
+        try {
+          const r = await api('POST', '/api/today/rebalance', { date });
+          await reload(); close();
+          toast(r.changed ? (r.stillOver ? `Trimmed what is realistic: about ${fmt(r.after - r.target)} kcal over. One day like this is fine.` : `Rest of today trimmed: ${fmt(r.after)} kcal`) : 'Nothing left to trim today.');
+        } catch (e) { toast(e.message, 'bad'); trim.disabled = false; trim.classList.remove('busy'); }
+      } }, 'Trim the rest of today');
+      body.replaceChildren(head,
+        note ? h('p', { class: 'sub' }, note) : null,
+        h('div', { class: 'after-day' },
+          h('span', { class: 'sub' }, 'Today, if you eat the rest of your plan'),
+          h('span', { class: 'after-nums' }, h('b', {}, fmt(proj)), ` of ${fmt(target)} kcal`)),
+        fine
+          ? h('p', {}, 'Still within today\'s target. Eat the rest of your plan as normal.')
+          : h('p', {}, `That is about ${fmt(over)} kcal over. Trimming makes the meals you have not eaten yet a bit smaller (rice, bread, oil first), so the day lands back near your target.`),
+        fine ? h('button', { class: 'btn block', onclick: close }, 'Done') : trim,
+        fine ? null : h('button', { class: 'btn ghost block', onclick: () => { close(); toast('Left as it is. One day over is fine; the week is what counts.'); } }, 'Leave today as it is'));
+    };
+    mealStep();
+    return body;
+  });
+}
+const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
+
+/** "2 slices of pizza", "2 eggs", "100 g chicken", "1 3-in-1 coffee sachet": the unit said once. */
+function amountLabel(label, foodName) {
+  const nm = String(foodName).split(/[,(]/)[0].trim().toLowerCase();
+  const m = /^([\d.½]+)\s+(.+)$/.exec(label);
+  if (!m) return `${label} of ${nm}`;
+  const unit = m[2]; const sing = unit.replace(/(es|s)$/, '');
+  if (nm.startsWith(sing)) return label;
+  if (nm.includes(sing)) return `${m[1]} ${nm}`;
+  if (/^(g|ml|g dry)$/.test(unit)) return `${label} ${nm}`;
+  return `${label} of ${nm}`;
 }

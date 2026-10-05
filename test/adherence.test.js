@@ -10,12 +10,20 @@ test('perfect day scores 100 with a checked-in, fully ticked workout', () => {
   assert.equal(s.total, 100);
 });
 
-test('training points: 15 for the approved check-in, 15 for the sets', () => {
+test('training points: the gym check-in earns all 30; logging sets earns nothing', () => {
   const day = { ...base, consumed: { kcal: 2200, p: 170 }, itemsDone: 10 };
-  assert.equal(dayScore({ ...day, workout: { planned: true, completion: 0, checkin: 'approved' } }).parts.workout, 15, 'attended, nothing ticked');
-  assert.equal(dayScore({ ...day, workout: { planned: true, completion: 1, checkin: null } }).parts.workout, 15, 'all sets, no check-in');
-  assert.equal(dayScore({ ...day, workout: { planned: true, completion: 0.5, checkin: 'approved' } }).parts.workout, 22.5);
-  assert.equal(dayScore({ ...day, workout: { planned: true, completion: 1, checkin: 'pending' } }).parts.workout, 15, 'a pending check-in counts once approved');
+  assert.equal(dayScore({ ...day, workout: { planned: true, completion: 0, checkin: 'approved' } }).parts.workout, 30, 'attended, nothing ticked (CrossFit, a class)');
+  assert.equal(dayScore({ ...day, workout: { planned: true, completion: 1, checkin: null } }).parts.workout, 0, 'all sets, no check-in');
+  assert.equal(dayScore({ ...day, workout: { planned: true, completion: 0.5, checkin: 'approved' } }).parts.workout, 30);
+  assert.equal(dayScore({ ...day, workout: { planned: true, completion: 1, checkin: 'pending' } }).parts.workout, 0, 'a pending check-in counts once approved');
+  assert.equal(dayScore({ ...day, workout: { planned: false, checkin: 'approved' } }).parts.workout, 30, 'trained on a rest day');
+});
+
+test('rest days earn 30 only within the plan\'s rest days for the week', () => {
+  const day = { ...base, consumed: { kcal: 2200, p: 170 }, itemsDone: 10 };
+  assert.equal(dayScore({ ...day, workout: { planned: false, checkin: null, restCounts: true } }).parts.workout, 30);
+  assert.equal(dayScore({ ...day, workout: { planned: false, checkin: null, restCounts: false } }).parts.workout, 0, 'an extra rest day');
+  assert.equal(dayScore({ ...day, workout: { planned: false, checkin: 'approved', restCounts: false } }).parts.workout, 30, 'a check-in always counts');
 });
 
 test('perfect day scores 100 when workouts are not attached yet', () => {

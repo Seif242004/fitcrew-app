@@ -75,7 +75,8 @@ export async function coachView() {
     log.append(...bubble({ role: 'user', content: text, at: new Date().toISOString().replace('T', ' ').slice(0, 19) }));
     log.append(typing); scrollEnd(true);
     try {
-      const r = await api('POST', '/api/coach', { text, today: localDate() });
+      const now = new Date();
+      const r = await api('POST', '/api/coach', { text, today: localDate(), clock: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}` });
       typing.remove();
       log.lastElementChild?.remove(); // the optimistic user bubble; the server copy replaces it
       for (const m of r.messages) log.append(...bubble(m));

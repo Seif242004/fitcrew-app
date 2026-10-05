@@ -9,7 +9,7 @@ export const ACTIVITY = {
   very_active: 1.9,
 };
 
-const KCAL_PER_KG = 7700;
+export const KCAL_PER_KG = 7700; // energy in 1 kg of body weight change (fat + water + some lean)
 
 /** Mifflin-St Jeor resting energy expenditure (kcal/day). */
 export function bmrMifflin({ sex, weightKg, heightCm, age }) {
@@ -51,7 +51,7 @@ export function tdee(bmrValue, activityLevel) {
   return bmrValue * factor;
 }
 
-const CALORIE_FLOOR = { male: 1500, female: 1200 };
+export const CALORIE_FLOOR = { male: 1500, female: 1200 };
 
 /**
  * Daily calorie target for a goal.
@@ -128,10 +128,16 @@ export function macros({ kcal, weightKg, heightCm, sex, bodyFatPct, goal }) {
   return { proteinG: Math.round(proteinG), fatG: Math.round(fatG), carbsG: Math.round(carbsG) };
 }
 
-/** Full pipeline from an onboarding profile to targets. */
-export function computeTargets(profile) {
+/**
+ * Full pipeline from an onboarding profile to targets.
+ * opts.tdeeAdjust: kcal the weekly check-ins learned on top of the formula maintenance
+ * (real burn measured from logged food and the weight trend; see adaptive.js). Kept as an
+ * offset to the formula, so a later weight or activity change still moves maintenance.
+ */
+export function computeTargets(profile, { tdeeAdjust = 0 } = {}) {
   const rest = bmr(profile);
-  const maintenance = tdee(rest.value, profile.activityLevel);
+  const formula = tdee(rest.value, profile.activityLevel);
+  const maintenance = formula + tdeeAdjust;
   const { kcal, warnings } = calorieTarget({
     tdeeValue: maintenance,
     goal: profile.goal,
@@ -143,6 +149,8 @@ export function computeTargets(profile) {
     bmr: Math.round(rest.value),
     bmrFormula: rest.formula,
     tdee: Math.round(maintenance),
+    tdeeFormula: Math.round(formula),
+    tdeeAdjust: Math.round(tdeeAdjust),
     kcal,
     ...macros({ kcal, weightKg: profile.weightKg, heightCm: profile.heightCm, sex: profile.sex, bodyFatPct: profile.bodyFatPct, goal: profile.goal }),
     warnings,

@@ -48,9 +48,11 @@ export async function profileView() {
           h('div', {}, h('b', {}, pf.goal === 'maintain' ? '0' : `${pf.goal === 'cut' ? '−' : '+'}${pf.weeklyRateKg}`), h('span', {}, 'kg a week')),
           h('div', {}, h('b', {}, adh?.streak ?? 0), h('span', {}, 'day streak'))) : null),
       t ? h('section', { class: 'section targets-card' },
-        h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Daily targets'), h('span', { class: 'sub' }, t.overridden ? 'Set by the admin' : 'Calculated for you')),
+        h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Daily targets'), h('span', { class: 'sub' }, t.overridden ? 'Set by the admin' : t.tdeeAdjust ? 'Tuned by your check-ins' : 'Calculated for you')),
         h('p', { class: 'targets-kcal' }, h('span', { class: 'num' }, fmt(t.kcal)), h('span', {}, ' kcal a day')),
         h('div', { class: 'mtiles' }, tile('Protein', 'p', t.proteinG, 4), tile('Carbs', 'c', t.carbsG, 4), tile('Fat', 'f', t.fatG, 9)),
+        // Maintenance learned by the weekly check-ins (real burn from logs and the weight trend).
+        !t.overridden && t.tdeeAdjust ? h('p', { class: 'meta', style: 'margin:12px 0 0' }, `Your real burn is about ${fmt(t.tdee)} kcal a day, ${fmt(Math.abs(t.tdeeAdjust))} ${t.tdeeAdjust > 0 ? 'more' : 'less'} than the formula guessed, from your weekly check-ins.`) : null,
         h('p', { class: 'meta', style: 'margin:12px 0 4px' }, `Resting burn ${fmt(t.bmr)} kcal (${t.bmrFormula === 'katch-mcardle' ? 'Katch-McArdle' : 'Mifflin-St Jeor'})${t.bodyFatPct ? ` · body fat ${t.bodyFatPct}%${t.bodyFatEstimated ? ', estimated' : ''}` : ''}`),
         ...(t.warnings ?? []).map((w) => h('p', { class: 'notice', style: 'margin:8px 0' }, w))) : null,
       h('p', { class: 'group-label' }, 'You'),

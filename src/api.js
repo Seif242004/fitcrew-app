@@ -4,7 +4,7 @@ import { computeTargets, navyBodyFat, ACTIVITY } from './calc.js';
 import { generatePlan, itemFor, totalsOf, filterFoods, TRAIN_TIMES, rebalanceDay, mealOptions, kindOf } from './plan.js';
 import { alternatives, equivalentGrams, exchangeGroup, describeAmount, amountHint, GROUP_LABEL } from './exchange.js';
 import { unitsFor, formatQty } from './measures.js';
-import { generatePlanSmart, aiConfig, DEFAULT_MODEL } from './plan-ai.js';
+import { generatePlanSmart, aiConfig, DEFAULT_MODEL, BENCH_PRIORITY } from './plan-ai.js';
 import { autoReview } from './review.js';
 import { getSetting, setSetting } from './db.js';
 import { coachTurn, actionLabel, chat as aiChat } from './coach.js';
@@ -12,9 +12,13 @@ import { vapidKeys, pushToUser } from './push.js';
 import { ALLERGEN_TAGS } from './foods-seed.js';
 import { loadFoods, rowToFood } from './db.js';
 import { hashPassword, verifyPassword, newToken, hashToken, newInviteCode, checkPasswordStrength } from './auth.js';
-import { dayScore, streak } from './adherence.js';
+import { dayScore, streak, mealMatch } from './adherence.js';
 import { registerTrain, workoutState, attendance, weekStart } from './api-train.js';
 import { registerSocial } from './social.js';
+import { registerCheckin } from './api-checkin.js';
+import { norm, searchFoods, findFood } from './search.js';
+import { mealIndex, amountFor, canStandIn, resolveUnit, isTreat } from './food-log.js';
+import { normalizeToolCalls } from './tool-calls.js';
 import { SPLITS, splitDaysError, INTENSITY } from './workout.js';
 
 let makePendingWorkoutPlan; // assigned when the training routes are registered, below
@@ -108,7 +112,8 @@ function cleanProfile(p, foodIds) {
   return out;
 }
 
-function targetsFor(data) {
+// tdeeAdjust: maintenance learned by the weekly check-ins (kcal over the formula), kept across edits.
+function targetsFor(data, tdeeAdjust = 0) {
   // Body fat from the removed photo AI is ignored; a typed value or the tape estimate is used.
   let bf = data.bodyFatSource === 'photos' ? undefined : data.bodyFatPct;
   let estimated = false;
@@ -119,10 +124,13 @@ function targetsFor(data) {
       if (est !== null) { bf = est; estimated = true; }
     }
   }
-  const t = computeTargets({ ...data, bodyFatPct: bf });
+  const t = computeTargets({ ...data, bodyFatPct: bf }, { tdeeAdjust });
   const source = bf !== undefined && !estimated ? 'typed' : estimated ? 'tape' : null;
   return { ...t, bodyFatPct: bf ?? null, bodyFatEstimated: estimated, bodyFatSource: source, engine: ENGINE };
 }
+
+/** The check-in's learned maintenance offset stored with a profile's targets (0 if none). */
+const learnedAdjust = (row) => (row ? JSON.parse(row.targets).tdeeAdjust ?? 0 : 0);
 
 const effectiveTargets = (row) => {
   if (!row) return null;
@@ -214,7 +222,7 @@ function upgradePlan(db, uid, today) {
   if (plan && plan.approved_by != null) return false; // a person approved this plan: leave it
   if (db.prepare('SELECT 1 FROM logs WHERE user_id = ? AND date = ? LIMIT 1').get(uid, today)) return false;
   const data = JSON.parse(prof.data);
-  db.prepare('UPDATE profiles SET targets = ? WHERE user_id = ?').run(JSON.stringify(targetsFor(data)), uid);
+  db.prepare('UPDATE profiles SET targets = ? WHERE user_id = ?').run(JSON.stringify(targetsFor(data, learnedAdjust(prof))), uid);
   if (plan) makePendingPlan(db, uid, 'Rebuilt with the improved plan engine');
   return true;
 }
@@ -233,14 +241,60 @@ const sumLogs = (logs) => logs.filter((l) => l.status !== 'skipped').reduce((a, 
 const r1 = (n) => Math.round(n * 10) / 10;
 const roundMacros = (m) => ({ kcal: Math.round(m.kcal), p: r1(m.p), c: r1(m.c), f: r1(m.f) });
 
+/**
+ * Diet food vs everything else. Diet food (planned items eaten, adjusted or swapped for a diet
+ * food, plus diet foods added to a meal) earns the calorie, protein and meal-match points;
+ * logging-only foods (pizza, a latte, sauces) and custom entries count toward the day's total,
+ * and so toward the over-target penalty, but never earn points.
+ */
+const offplanIds = (db) => new Set(db.prepare('SELECT id FROM foods WHERE offplan = 1').all().map((r) => r.id));
+const isPlanLog = (l, off) => !l.ref.startsWith('extra:') && l.status !== 'skipped' && !(l.status === 'swapped' && off.has(l.food_id));
+const isDietExtra = (l, off) => l.ref.startsWith('extra:') && l.food_id && !off.has(l.food_id);
+
+/**
+ * Each meal's plan (after "just today" swaps and trims) and the diet food eaten in it.
+ * Returns [{ name, planned: {kcal,p,c,f}, eaten: {kcal,p,c,f}, logged }].
+ */
+function mealTotals(db, uid, plan, date, logs, off) {
+  const { idx, meals } = dayMeals(db, uid, plan, date);
+  const swaps = new Map(db.prepare('SELECT * FROM day_swaps WHERE user_id = ? AND date = ?').all(uid, date).map((r) => [r.ref, r]));
+  const foods = swaps.size ? new Map(loadFoods(db, { includeInactive: true }).map((f) => [f.id, f])) : null;
+  const byRef = new Map(logs.map((l) => [l.ref, l]));
+  return meals.map((m, mi) => {
+    const planned = { kcal: 0, p: 0, c: 0, f: 0 }; const eaten = { kcal: 0, p: 0, c: 0, f: 0 };
+    let logged = false;
+    m.items.forEach((it, ii) => {
+      const ref = `${idx}-${mi}-${ii}`;
+      const sw = swaps.get(ref); const sf = sw && foods.get(sw.food_id);
+      const item = sf ? itemFor(sf, sw.grams) : it;
+      for (const k of ['kcal', 'p', 'c', 'f']) planned[k] += item[k];
+      const l = byRef.get(ref);
+      if (l) logged = true;
+      if (l && isPlanLog(l, off)) for (const k of ['kcal', 'p', 'c', 'f']) eaten[k] += l[k];
+    });
+    for (const l of logs) {
+      if (l.meal !== mi || !l.ref.startsWith('extra:')) continue;
+      logged = true;
+      if (isDietExtra(l, off)) for (const k of ['kcal', 'p', 'c', 'f']) eaten[k] += l[k];
+    }
+    return { name: m.name, planned, eaten, logged };
+  });
+}
+
 function scoreDay(db, uid, date, plan, targets) {
-  const { meals } = dayMeals(db, uid, plan, date);
-  const itemsTotal = meals.reduce((a, m) => a + m.items.length, 0);
   const logs = db.prepare('SELECT * FROM logs WHERE user_id = ? AND date = ?').all(uid, date);
   const consumed = sumLogs(logs);
-  const itemsDone = logs.filter((l) => !l.ref.startsWith('extra:') && l.status !== 'skipped').length;
-  const s = dayScore({ targets: { kcal: targets.kcal, proteinG: targets.proteinG }, consumed, itemsTotal, itemsDone, loggedSameDay: logs.some((l) => l.logged_on === date), workout: workoutState(db, uid, date) });
-  return { date, total: s.total, parts: s.parts, consumed: roundMacros(consumed) };
+  const off = offplanIds(db);
+  const dietLogs = logs.filter((l) => isPlanLog(l, off) || isDietExtra(l, off));
+  const meals = mealTotals(db, uid, plan, date, logs, off);
+  const itemsDone = logs.filter((l) => isPlanLog(l, off)).length;
+  const goal = targets.goal ?? (JSON.parse(db.prepare('SELECT data FROM profiles WHERE user_id = ?').get(uid)?.data ?? '{}').goal);
+  const s = dayScore({ targets: { kcal: targets.kcal, proteinG: targets.proteinG, goal }, consumed, planConsumed: sumLogs(dietLogs), itemsTotal: 0, itemsDone, meals, loggedSameDay: logs.some((l) => l.logged_on === date), workout: workoutState(db, uid, date) });
+  return {
+    date, total: s.total, parts: s.parts, consumed: roundMacros(consumed),
+    // Per meal: how close it came to its plan (null until something is logged in it).
+    meals: meals.map((m) => ({ name: m.name, match: m.logged ? Math.round((mealMatch(m.planned, m.eaten) ?? 0) * 100) : null })),
+  };
 }
 
 function scoresBetween(db, uid, from, to) {
@@ -367,8 +421,8 @@ route('PUT', '/api/profile', 'user', async (ctx) => {
   const uid = subjectId(ctx, ctx.body);
   const foodIds = new Set(loadFoods(ctx.db).map((f) => f.id));
   const data = cleanProfile(ctx.body.profile, foodIds);
-  const targets = targetsFor(data);
-  const existing = ctx.db.prepare('SELECT 1 FROM profiles WHERE user_id = ?').get(uid);
+  const existing = ctx.db.prepare('SELECT * FROM profiles WHERE user_id = ?').get(uid);
+  const targets = targetsFor(data, learnedAdjust(existing));
   if (existing) {
     ctx.db.prepare("UPDATE profiles SET data = ?, targets = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").run(JSON.stringify(data), JSON.stringify(targets), uid);
   } else {
@@ -387,11 +441,33 @@ route('PUT', '/api/profile', 'user', async (ctx) => {
   return { ok: true, targets: effectiveTargets(ctx.db.prepare('SELECT * FROM profiles WHERE user_id = ?').get(uid)), pendingPlanId: planId };
 });
 
+// Foods with the units each can be logged in (eggs, cups, slices, g).
+//   no q             the whole list (onboarding likes, admin plan editor, admin foods)
+//   q=...            search (search.js: Arabic + English, any word order, Egyptian spellings),
+//                    best first; empty q with recent=1 gives the person's recent "other foods"
+//   offplan=1        also off-plan foods (pizza, sweets), after the diet foods; only the
+//                    "Add food" sheet and the admin list ask for them, never swaps
+// Quick adds shown before typing: the everyday drinks and extras of an Egyptian day.
+const POPULAR = ['tea-sugar', 'turkish-coffee-sugar', 'nescafe-3in1', 'nescafe-milk', 'cappuccino', 'orange-juice', 'milk', 'sugar', 'tea'];
+
 route('GET', '/api/foods', 'user', (ctx) => {
-  const q = (ctx.query.get('q') ?? '').toLowerCase();
-  // English or Arabic search; each food comes with the units it can be logged in (eggs, cups, g).
-  const foods = loadFoods(ctx.db).filter((f) => !q || f.name.toLowerCase().includes(q) || (f.ar ?? '').includes(q));
-  return { foods: foods.slice(0, 200).map((f) => ({ ...f, units: unitsFor(f) })) };
+  const withOff = ctx.query.get('offplan') === '1';
+  const foods = loadFoods(ctx.db, { offplan: withOff });
+  const out = (list) => list.map((f) => ({ ...f, units: unitsFor(f), treat: isTreat(f) }));
+  if (!ctx.query.has('q')) return { foods: out(foods) };
+  const q = ctx.query.get('q');
+  if (norm(q)) return { foods: out(searchFoods(foods, q, 40)) };
+  // Empty search in Add food: recent foods, and the drinks people add all the time.
+  const popular = withOff && ctx.query.get('popular') === '1'
+    ? out(POPULAR.map((id) => foods.find((f) => f.id === id)).filter(Boolean)) : undefined;
+  if (ctx.query.get('recent') !== '1') return { foods: [], popular };
+  const uid = subjectId(ctx);
+  const byId = new Map(foods.map((f) => [f.id, f]));
+  const recent = ctx.db.prepare(`SELECT food_id, MAX(id) last FROM logs WHERE user_id = ? AND food_id IS NOT NULL
+      AND (ref LIKE 'extra:%' OR status = 'swapped') AND date >= ? GROUP BY food_id ORDER BY last DESC LIMIT 12`).all(uid, addDays(todayUtc(), -30))
+    .map((r) => byId.get(r.food_id)).filter(Boolean).slice(0, 8);
+  const seen = new Set(recent.map((f) => f.id));
+  return { foods: out(recent), recent: true, popular: popular?.filter((f) => !seen.has(f.id)) };
 });
 
 route('GET', '/api/plan', 'user', (ctx) => {
@@ -459,10 +535,15 @@ route('GET', '/api/today', 'user', (ctx) => {
       };
     }),
   }));
-  const extras = logs.filter((l) => l.ref.startsWith('extra:')).map((l) => {
+  // Extra foods and drinks: inside the meal they were added to, or "Other food" when not placed
+  // (older logs, or a meal that no longer exists after a plan change).
+  const extraOf = (l) => {
     const lf = l.food_id ? foodsById.get(l.food_id) : null;
-    return { ref: l.ref, name: l.name, grams: l.grams, amount: l.amount ?? (lf && l.grams ? describeAmount(lf, l.grams) : l.grams ? `${l.grams} g` : null), kcal: Math.round(l.kcal), p: r1(l.p), c: r1(l.c), f: r1(l.f) };
-  });
+    return { ref: l.ref, name: l.name, foodId: l.food_id, grams: l.grams, offplan: Boolean(lf?.offplan), meal: l.meal ?? null, amount: l.amount ?? (lf && l.grams ? describeAmount(lf, l.grams) : l.grams ? `${l.grams} g` : null), kcal: Math.round(l.kcal), p: r1(l.p), c: r1(l.c), f: r1(l.f) };
+  };
+  const allExtras = logs.filter((l) => l.ref.startsWith('extra:')).sort((a, b) => a.id - b.id).map(extraOf);
+  meals.forEach((m, mi) => { m.extras = allExtras.filter((e) => e.meal === mi); });
+  const extras = allExtras.filter((e) => e.meal === null || e.meal >= meals.length);
   return {
     date, dayIdx: idx, planId: plan.id, targets, meals, extras, water: waterFor(ctx.db, uid, date),
     // What the day adds up to if everything not yet logged is eaten as planned.
@@ -492,7 +573,8 @@ route('POST', '/api/coach', 'user', async (ctx) => {
   const userMsgId = Number(ins.run(uid, 'user', 'chat', text, null).lastInsertRowid);
   let out;
   try {
-    out = await coachTurn({ db: ctx.db, user: ctx.user, text, today, history });
+    const clock = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(ctx.body.clock ?? '')) ? ctx.body.clock : null;
+    out = await coachTurn({ db: ctx.db, user: ctx.user, text, today, clock, history });
   } catch (e) {
     console.warn('[coach]', e.message, e.body ?? '');
     out = { reply: e.name === 'AbortError' ? 'That took too long on the AI side. Try again in a moment.' : 'I could not reach the AI right now. Try again in a minute; the rest of the app works as normal.', actions: [], failed: true };
@@ -556,36 +638,73 @@ route('POST', '/api/admin/ai-test', 'admin', async (ctx) => {
 
 // Benchmark: which models are available, how fast each answers a real tool-calling request,
 // and whether it actually calls the tool. Runs in parallel, 30 s cap per model.
-const BENCH_FAMILIES = /kimi|deepseek-v|glm|qwen3|llama-4|llama-3\.3|gpt-oss|mistral-(medium|large|small)|nemotron-(super|ultra)/i;
+const BENCH_FAMILIES = /kimi|deepseek-v|glm|qwen3|llama-4|llama-3\.3|gpt-oss|mistral-(medium|large|small)|nemotron-(super|ultra|3)/i;
+/** Featured models first (BENCH_PRIORITY), then the rest; models this account cannot use go last. */
+/**
+ * What is wrong with a benchmark answer, or null when it would log the breakfast right:
+ * meal = breakfast, and 100 g bread, 2 scrambled eggs (120 g), 10 g cheddar, 1 sachet (18 g), 100 ml milk.
+ */
+export function benchProblem(args, foods) {
+  if (mealIndex([{ name: 'Breakfast' }, { name: 'Lunch' }, { name: 'Dinner' }], args.meal ?? '') !== 0) return `meal was "${args.meal ?? 'missing'}"`;
+  const items = Array.isArray(args.items) ? args.items : [];
+  const want = [['baladi-bread', 100, 'bread 100 g'], ['eggs-scrambled', 120, '2 eggs'], ['cheddar', 10, 'cheddar 10 g'], ['nescafe-3in1', 18, '1 Nescafé sachet'], ['milk', 100, 'milk 100 ml']];
+  for (const [id, grams, label] of want) {
+    const hit = items.map((i) => {
+      const food = foods.find((f) => f.id === i?.foodId) ?? (i?.name || i?.foodId ? findFood(foods, String(i.name ?? i.foodId)) : null);
+      if (!food || (food.id !== id && !(id === 'baladi-bread' && food.cat === 'carb') && !(id === 'eggs-scrambled' && /^eggs/.test(food.id)))) return null;
+      try { return amountFor(food, i).grams; } catch { return -1; }
+    }).filter((g) => g !== null);
+    if (!hit.length) return `missed ${label}`;
+    if (!hit.some((g) => Math.abs(g - grams) <= grams * 0.05)) return `${label} logged as ${Math.round(hit[0])} g`;
+  }
+  return null;
+}
+
+export function benchOrder(ids, unavailable) {
+  const rank = (id) => { const i = BENCH_PRIORITY.findIndex((re) => re.test(id)); return (unavailable.has(id) ? 100 : 0) + (i < 0 ? 50 : i); };
+  return [...new Set(ids)].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
 route('POST', '/api/admin/ai-benchmark', 'admin', async (ctx) => {
   const cfg = aiConfig();
   if (!cfg) return { ok: false, message: 'No FITCREW_AI_KEY is set on the server.' };
   let ids = [];
   try {
     const r = await fetch(`${cfg.baseUrl}/models`, { headers: { authorization: `Bearer ${cfg.key}` } });
-    ids = (await r.json()).data.map((m) => m.id).filter((id) => BENCH_FAMILIES.test(id) && !/coder|embed|vision|guard|reward|-vl/i.test(id));
+    ids = (await r.json()).data.map((m) => m.id).filter((id) => BENCH_FAMILIES.test(id) && !/coder|embed|vision|guard|reward|-vl|safety|retriever/i.test(id));
   } catch (e) { return { ok: false, message: `Could not list models: ${e.message}` }; }
-  const tool = { type: 'function', function: { name: 'log_food', description: 'Log a food the person ate', parameters: { type: 'object', properties: { foodId: { type: 'string' }, grams: { type: 'number' } }, required: ['foodId', 'grams'] } } };
+  // Models that answered "not available on your account" last time are tried after the others.
+  const unavailable = new Set(getSetting(ctx.db, 'aiUnavailable', []));
+  ids = benchOrder(ids, unavailable);
+  // The test is a real report from the crew: several foods, mixed units, one meal, in English.
+  const tool = { type: 'function', function: { name: 'log_foods', description: 'Log what the person ate: one call per meal with every item, in their own amounts.', parameters: { type: 'object', properties: { meal: { type: 'string' }, items: { type: 'array', items: { type: 'object', properties: { foodId: { type: 'string' }, qty: { type: 'number' }, unit: { type: 'string' }, grams: { type: 'number' } } } } }, required: ['items'] } } };
+  const benchFoods = loadFoods(ctx.db, { offplan: true });
   const one = async (model) => {
     const ac = new AbortController(); const timer = setTimeout(() => ac.abort(), 30_000); const t0 = Date.now();
     try {
       const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
         method: 'POST', signal: ac.signal, headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.key}` },
-        body: JSON.stringify({ model, max_tokens: 300, temperature: 0, tools: [tool], tool_choice: 'auto', messages: [
-          { role: 'system', content: 'You log food for the user. Foods: toast-brown (Brown toast, 1 slice = 30 g), eggs (Eggs, 1 egg = 50 g).' },
-          { role: 'user', content: 'كلت ٢ توست أسمر' }] }),
+        body: JSON.stringify({ model, max_tokens: 4096, temperature: 0, tools: [tool], tool_choice: 'auto', messages: [
+          { role: 'system', content: 'You log food for the user with log_foods. Meals today: breakfast, lunch, dinner. Foods: baladi-bread (loaf = 90 g), eggs-scrambled (egg = 60 g), cheddar (slice = 20 g), nescafe-3in1 (sachet = 18 g), milk (ml), sugar (tsp, tbsp). Never convert amounts: pass what they said.' },
+          { role: 'user', content: 'scrambled eggs sandwich for breakfast (100gm bread, 2 eggs, 10 gm cheddar) and a nescafe 3 in 1 with 100ml milk' }] }),
       });
       const ms = Date.now() - t0;
       if (!res.ok) return { model, ok: false, ms, error: res.status === 404 ? 'Not available on your NVIDIA account' : res.status === 429 ? 'Rate limited right now' : `HTTP ${res.status}` };
-      const msg = (await res.json()).choices?.[0]?.message ?? {};
-      const call = msg.tool_calls?.[0];
-      const args = call ? JSON.parse(call.function.arguments || '{}') : null;
-      const correct = Boolean(call && args?.foodId === 'toast-brown' && Math.abs(Number(args.grams) - 60) <= 1);
-      return { model, ok: true, ms, toolCall: Boolean(call), correct };
-    } catch (e) { return { model, ok: false, ms: Date.now() - t0, error: e.name === 'AbortError' ? 'Over 30 s (overloaded right now)' : e.message }; }
+      const choice = (await res.json()).choices?.[0] ?? {};
+      const msg = normalizeToolCalls(choice.message ?? {}, new Set(['log_foods']));
+      const call = msg.tool_calls?.find((c) => c.function?.name === 'log_foods');
+      let args = null;
+      try { args = call ? JSON.parse(call.function.arguments || '{}') : null; } catch { args = null; }
+      // Judged the way the app would log it (same food lookup and unit maths), so any valid way
+      // of saying the amounts passes and the reason for a fail is shown.
+      const problem = !call ? (choice.finish_reason === 'length' ? 'ran out of room while thinking' : `answered in text: "${String(msg.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 70)}"`)
+        : !args ? 'tool call was not valid JSON' : benchProblem(args, benchFoods);
+      return { model, ok: true, ms, toolCall: Boolean(call), correct: !problem, problem };
+    } catch (e) { return { model, ok: false, ms: Date.now() - t0, error: e.name === 'AbortError' ? 'Over 30 s (too slow or overloaded right now)' : e.message }; }
     finally { clearTimeout(timer); }
   };
-  const results = await Promise.all(ids.slice(0, 12).map(one));
+  const results = await Promise.all(ids.slice(0, 16).map(one));
+  setSetting(ctx.db, 'aiUnavailable', [...new Set([...unavailable, ...results.filter((x) => x.error?.startsWith('Not available')).map((x) => x.model)])]
+    .filter((m) => !results.some((x) => x.model === m && x.ok)));
   // Usable = answered and called the tool correctly; fastest first.
   results.sort((a, b) => (b.correct - a.correct) || (b.ok - a.ok) || a.ms - b.ms);
   return { ok: true, current: getSetting(ctx.db, 'aiModelPreferred', null) ?? getSetting(ctx.db, 'aiModelWorking', null) ?? cfg.model, results };
@@ -679,7 +798,7 @@ route('POST', '/api/profile/goal', 'user', async (ctx) => {
   if (ctx.body.activityLevel !== undefined) next.activityLevel = ctx.body.activityLevel;
   const foodIds = new Set(loadFoods(ctx.db, { includeInactive: true }).map((f) => f.id));
   const clean = cleanProfile(next, foodIds);
-  const targets = targetsFor(clean);
+  const targets = targetsFor(clean, learnedAdjust(row));
   ctx.db.prepare('UPDATE profiles SET data = ?, targets = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(JSON.stringify(clean), JSON.stringify(targets), uid);
   const regenerated = activePlan(ctx.db, uid) ? await regenerate(ctx, uid, 'Goal changed') : null;
   return { ok: true, targets: effectiveTargets(ctx.db.prepare('SELECT * FROM profiles WHERE user_id = ?').get(uid)), regenerated };
@@ -866,12 +985,22 @@ route('POST', '/api/today/rebalance', 'user', (ctx) => {
 });
 
 const STATUSES = ['eaten', 'adjusted', 'swapped', 'skipped'];
-function upsertLog(db, uid, { date, ref, status, foodId, name, grams, macros, loggedOn, amount = null }) {
-  db.prepare(`INSERT INTO logs (user_id, date, ref, status, food_id, name, grams, kcal, p, c, f, logged_on, amount)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+function upsertLog(db, uid, { date, ref, status, foodId, name, grams, macros, loggedOn, amount = null, meal = null }) {
+  db.prepare(`INSERT INTO logs (user_id, date, ref, status, food_id, name, grams, kcal, p, c, f, logged_on, amount, meal)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (user_id, date, ref) DO UPDATE SET status = excluded.status, food_id = excluded.food_id, name = excluded.name,
-      grams = excluded.grams, kcal = excluded.kcal, p = excluded.p, c = excluded.c, f = excluded.f, logged_on = excluded.logged_on, amount = excluded.amount`)
-    .run(uid, date, ref, status, foodId ?? null, name ?? null, grams, macros.kcal, macros.p, macros.c, macros.f, loggedOn, amount);
+      grams = excluded.grams, kcal = excluded.kcal, p = excluded.p, c = excluded.c, f = excluded.f, logged_on = excluded.logged_on, amount = excluded.amount, meal = excluded.meal`)
+    .run(uid, date, ref, status, foodId ?? null, name ?? null, grams, macros.kcal, macros.p, macros.c, macros.f, loggedOn, amount, meal);
+}
+
+/** The meal index an extra goes in: a valid index for that day's plan, or null (not placed). */
+function extraMeal(db, uid, date, meal) {
+  if (meal === undefined || meal === null || meal === '') return null;
+  const plan = planForDate(db, uid, date) ?? activePlan(db, uid);
+  if (!plan) return null;
+  const i = mealIndex(dayMeals(db, uid, plan, date).meals, meal);
+  if (i === null) throw bad('Unknown meal');
+  return i;
 }
 
 /**
@@ -881,9 +1010,10 @@ function upsertLog(db, uid, { date, ref, status, foodId, name, grams, macros, lo
  */
 function eatenAmount(food, body, { min = 0, max = 3000 } = {}) {
   if (body.unit !== undefined && body.unit !== null && body.unit !== '') {
-    const u = unitsFor(food).find((x) => x.key === body.unit);
+    // A unit key ("u", "m0", "dry", "g") or what people call it ("glass", "slices", "ml").
+    const u = resolveUnit(food, body.unit);
     if (!u) throw bad('Unknown unit for this food');
-    const qty = num(body.qty, 0, u.grams ? max : 50, 'amount');
+    const qty = num(body.qty, 0, u.grams || u.generic ? max : 50, 'amount');
     const grams = Math.round(qty * u.g * 10) / 10;
     if (grams < min || grams > max) throw bad(`That is more than ${max} g`);
     return { grams, amount: formatQty(u, qty) };
@@ -923,7 +1053,8 @@ route('POST', '/api/log', 'user', (ctx) => {
     macros = itemFor(food, grams); foodId = food.id; name = food.name;
   }
   if (status === 'swapped') {
-    const food = loadFoods(ctx.db).find((f) => f.id === ctx.body.foodId);
+    // Ate something else instead of this item: a log, not a plan change, so off-plan foods count too.
+    const food = loadFoods(ctx.db, { offplan: true }).find((f) => f.id === ctx.body.foodId);
     if (!food) throw bad('Unknown food');
     ({ grams, amount } = eatenAmount(food, ctx.body, { min: 1, max: 2000 }));
     macros = itemFor(food, grams); foodId = food.id; name = food.name;
@@ -940,7 +1071,8 @@ route('POST', '/api/log/extra', 'user', (ctx) => {
   const loggedOn = isDate(ctx.body.today) ? ctx.body.today : date;
   let macros; let name; let foodId = null; let grams = 0; let amount = null;
   if (ctx.body.foodId) {
-    const food = loadFoods(ctx.db).find((f) => f.id === ctx.body.foodId);
+    // Any active food, off-plan ones included (pizza, sweets): logging what was eaten is always allowed.
+    const food = loadFoods(ctx.db, { offplan: true }).find((f) => f.id === ctx.body.foodId);
     if (!food) throw bad('Unknown food');
     ({ grams, amount } = eatenAmount(food, ctx.body, { min: 1, max: 3000 }));
     macros = itemFor(food, grams); name = food.name; foodId = food.id;
@@ -948,11 +1080,132 @@ route('POST', '/api/log/extra', 'user', (ctx) => {
     name = str(ctx.body.name, 80, 'name', true);
     macros = { kcal: num(ctx.body.kcal, 0, 5000, 'kcal'), p: num(ctx.body.p ?? 0, 0, 500, 'p'), c: num(ctx.body.c ?? 0, 0, 800, 'c'), f: num(ctx.body.f ?? 0, 0, 500, 'f') };
   }
+  const meal = extraMeal(ctx.db, uid, date, ctx.body.meal);
   const ref = `extra:${crypto.randomBytes(4).toString('hex')}`;
-  upsertLog(ctx.db, uid, { date, ref, status: 'eaten', foodId, name, grams, macros, loggedOn, amount });
+  upsertLog(ctx.db, uid, { date, ref, status: 'eaten', foodId, name, grams, macros, loggedOn, amount, meal });
   if (uid !== ctx.user.id) audit(ctx.db, ctx.user.id, 'log.extra_added_by_admin', uid, { date, name });
   try { dayChanged(ctx.db, uid, date); } catch (e) { console.warn('[feed]', e.message); }
-  return { ok: true, ref };
+  const food = foodId ? loadFoods(ctx.db, { includeInactive: true }).find((f) => f.id === foodId) : null;
+  return { ok: true, ref, name, meal, kcal: Math.round(macros.kcal), amount: amount ?? (food && grams ? describeAmount(food, grams) : grams ? `${grams} g` : null) };
+});
+
+// Move an extra food or drink into a meal (or out of every meal with meal: null).
+route('POST', '/api/log/meal', 'user', (ctx) => {
+  const uid = subjectId(ctx, ctx.body);
+  const date = needDate(ctx.body.date);
+  const ref = str(ctx.body.ref, 30, 'ref', true);
+  if (!ref.startsWith('extra:')) throw bad('Only added foods can be moved between meals');
+  const meal = extraMeal(ctx.db, uid, date, ctx.body.meal);
+  const r = ctx.db.prepare('UPDATE logs SET meal = ? WHERE user_id = ? AND date = ? AND ref = ?').run(meal, uid, date, ref);
+  if (!r.changes) throw notFound('That food is not logged on this day');
+  return { ok: true, meal };
+});
+
+/**
+ * Log what someone ate, the way they say it, in one call (the coach and the Add food sheet).
+ *   { date, today, meal: 0 | "breakfast" | null, items: [{ foodId | name, qty, unit, grams, kcal, p, c, f }] }
+ * For each item the server finds the food (id, or the best search match for its name), works out
+ * the grams from the unit said ("2 eggs", "100 ml", "3 tbsp"), then:
+ *   - a planned item of that meal with the same food (or a stand-in: scrambled for boiled eggs,
+ *     shami for baladi) is marked eaten, or adjusted / swapped when the amount or food differs;
+ *   - anything else is added to that meal as an extra (extras never earn points);
+ *   - the same food, amount and meal logged in the last 20 minutes is skipped as a repeat,
+ *     so asking twice never logs twice.
+ * Unknown foods need kcal (an estimate) and are logged as custom extras.
+ * Returns { ok, meal, mealName, results: [{ name, amount, kcal, as, ref }], day: { kcal, target, left, protein } }.
+ */
+route('POST', '/api/log/foods', 'user', (ctx) => {
+  const uid = subjectId(ctx, ctx.body);
+  const date = needDate(ctx.body.date);
+  const loggedOn = isDate(ctx.body.today) ? ctx.body.today : date;
+  const items = Array.isArray(ctx.body.items) ? ctx.body.items.slice(0, 15) : [];
+  if (!items.length) throw bad('Nothing to log');
+  const plan = planForDate(ctx.db, uid, date) ?? activePlan(ctx.db, uid);
+  const day = plan ? dayMeals(ctx.db, uid, plan, date) : { idx: 0, meals: [] };
+  let meal = null;
+  if (ctx.body.meal !== undefined && ctx.body.meal !== null && ctx.body.meal !== '') {
+    meal = mealIndex(day.meals, ctx.body.meal);
+    if (meal === null && day.meals.length) throw bad(`Unknown meal "${ctx.body.meal}". Meals today: ${day.meals.map((m) => m.name).join(', ')}`);
+  }
+  const all = loadFoods(ctx.db, { offplan: true });
+  const byId = new Map(loadFoods(ctx.db, { includeInactive: true }).map((f) => [f.id, f]));
+  const swaps = new Map(ctx.db.prepare('SELECT * FROM day_swaps WHERE user_id = ? AND date = ?').all(uid, date).map((r) => [r.ref, r]));
+  const logged = new Map(ctx.db.prepare('SELECT * FROM logs WHERE user_id = ? AND date = ?').all(uid, date).map((l) => [l.ref, l]));
+  // Planned items still open, in the chosen meal first, each with the food on the plan today.
+  const open = [];
+  day.meals.forEach((m, mi) => m.items.forEach((it, ii) => {
+    const ref = `${day.idx}-${mi}-${ii}`;
+    const sw = swaps.get(ref);
+    open.push({ ref, mi, food: byId.get(sw?.food_id ?? it.foodId), grams: sw?.grams ?? it.grams, log: logged.get(ref) });
+  }));
+  const results = [];
+  const used = new Set();
+  for (const raw of items) {
+    const it = raw && typeof raw === 'object' ? raw : {};
+    const label = String(it.name ?? it.foodId ?? 'food').slice(0, 80);
+    try {
+      let food = it.foodId ? all.find((f) => f.id === it.foodId) : null;
+      if (!food && it.name) food = findFood(all, String(it.name));
+      if (!food) {
+        // Not in the database: a custom extra with the estimate given.
+        if (!(Number(it.kcal) >= 0) || it.kcal === undefined) throw bad(`"${label}" is not in the food list. Give an estimate (kcal, protein, carbs, fat) to log it as a custom food`);
+        const macros = { kcal: num(it.kcal, 0, 5000, 'kcal'), p: num(it.p ?? 0, 0, 500, 'p'), c: num(it.c ?? 0, 0, 800, 'c'), f: num(it.f ?? 0, 0, 500, 'f') };
+        const name = str(it.name, 80, 'name', true);
+        const dup = ctx.db.prepare("SELECT ref FROM logs WHERE user_id = ? AND date = ? AND ref LIKE 'extra:%' AND food_id IS NULL AND name = ? AND ABS(kcal - ?) < 1 AND meal IS ? AND created_at >= datetime('now', '-20 minutes')").get(uid, date, name, macros.kcal, meal);
+        if (dup) { results.push({ name, kcal: Math.round(macros.kcal), as: 'repeat', ref: dup.ref }); continue; }
+        const ref = `extra:${crypto.randomBytes(4).toString('hex')}`;
+        upsertLog(ctx.db, uid, { date, ref, status: 'eaten', foodId: null, name, grams: 0, macros, loggedOn, meal });
+        results.push({ name, kcal: Math.round(macros.kcal), as: 'custom', ref });
+        continue;
+      }
+      let amt;
+      try { amt = amountFor(food, it); } catch (e) { throw bad(e.message); }
+      if (amt.grams > 3000) throw bad(`${amt.grams} g of ${food.name} is more than one meal`);
+      const macros = itemFor(food, amt.grams);
+      const readback = amt.amount ?? describeAmount(food, amt.grams);
+      // 1) A planned item: same food first, then a stand-in, in the chosen meal (any meal when
+      //    no meal was given, same food only).
+      const pool = open.filter((o) => !used.has(o.ref) && o.food && (meal === null || o.mi === meal));
+      const isOpen = (o) => !o.log || o.log.status === 'skipped';
+      const sameGrams = (o) => o.log && Math.abs(o.log.grams - amt.grams) <= Math.max(2, amt.grams * 0.05);
+      // Already logged exactly like this (asked twice, or ticked in the app first): nothing to do.
+      const already = pool.find((o) => !isOpen(o) && o.log.food_id === food.id && sameGrams(o));
+      if (already) { used.add(already.ref); results.push({ name: food.name, amount: readback, kcal: Math.round(already.log.kcal), as: 'repeat', ref: already.ref }); continue; }
+      // In a named meal, the same food on the plan is that item even when it was ticked already
+      // ("I had 3 eggs at breakfast" corrects the 2 ticked eggs, it does not add 3 more).
+      const match = pool.find((o) => o.food.id === food.id && isOpen(o))
+        ?? (meal !== null ? pool.find((o) => o.food.id === food.id && o.log?.food_id === food.id) : null)
+        ?? (meal !== null ? pool.find((o) => isOpen(o) && canStandIn(food, o.food, { ateG: amt.grams, plannedG: o.grams })) : null);
+      if (match) {
+        used.add(match.ref);
+        const same = match.food.id === food.id;
+        const asPlanned = same && Math.abs(amt.grams - match.grams) <= Math.max(3, match.grams * 0.1);
+        const status = asPlanned ? 'eaten' : same ? 'adjusted' : 'swapped';
+        const g = asPlanned ? match.grams : amt.grams;
+        const m2 = asPlanned ? itemFor(food, g) : macros;
+        upsertLog(ctx.db, uid, { date, ref: match.ref, status, foodId: food.id, name: food.name, grams: g, macros: m2, loggedOn, amount: asPlanned ? null : amt.amount });
+        results.push({ name: food.name, amount: asPlanned ? (amt.amount ?? describeAmount(food, g)) : readback, kcal: Math.round(m2.kcal), as: status === 'eaten' ? 'planned' : status, ref: match.ref, ...(same ? {} : { instead: match.food.name }) });
+        continue;
+      }
+      // 2) An extra in that meal, unless it is a repeat of one logged in the last 20 minutes.
+      const dup = ctx.db.prepare("SELECT ref FROM logs WHERE user_id = ? AND date = ? AND ref LIKE 'extra:%' AND food_id = ? AND ABS(grams - ?) <= ? AND meal IS ? AND created_at >= datetime('now', '-20 minutes')").get(uid, date, food.id, amt.grams, Math.max(2, amt.grams * 0.05), meal);
+      if (dup) { results.push({ name: food.name, amount: readback, kcal: Math.round(macros.kcal), as: 'repeat', ref: dup.ref }); continue; }
+      const ref = `extra:${crypto.randomBytes(4).toString('hex')}`;
+      upsertLog(ctx.db, uid, { date, ref, status: 'eaten', foodId: food.id, name: food.name, grams: amt.grams, macros, loggedOn, amount: amt.amount, meal });
+      results.push({ name: food.name, amount: readback, kcal: Math.round(macros.kcal), as: 'extra', ref, ...(isTreat(food) ? { offPlan: true } : {}) });
+    } catch (e) {
+      results.push({ name: label, error: e.message });
+    }
+  }
+  if (uid !== ctx.user.id) audit(ctx.db, ctx.user.id, 'log.foods_by_admin', uid, { date, n: results.length });
+  try { dayChanged(ctx.db, uid, date); } catch (e) { console.warn('[feed]', e.message); }
+  const prof = ctx.db.prepare('SELECT * FROM profiles WHERE user_id = ?').get(uid);
+  const t = effectiveTargets(prof);
+  const eaten = sumLogs(ctx.db.prepare('SELECT * FROM logs WHERE user_id = ? AND date = ?').all(uid, date));
+  return {
+    ok: results.some((r) => !r.error), meal, mealName: meal !== null ? day.meals[meal]?.name ?? null : null, results,
+    day: t ? { kcal: Math.round(eaten.kcal), target: t.kcal, left: Math.round(t.kcal - eaten.kcal), protein: Math.round(eaten.p), proteinTarget: t.proteinG } : null,
+  };
 });
 
 route('POST', '/api/log/remove', 'user', (ctx) => {
@@ -1103,6 +1356,9 @@ route('GET', '/api/admin/users/:id', 'admin', (ctx) => {
     attendance: attendance(ctx.db, u.id, addDays(today, -27), today),
     checkins: ctx.db.prepare('SELECT id, date, status, image IS NOT NULL hasPhoto FROM checkins WHERE user_id = ? ORDER BY date DESC LIMIT 14').all(u.id).map((r) => ({ ...r, hasPhoto: Boolean(r.hasPhoto) })),
     photoCount: ctx.db.prepare('SELECT COUNT(*) n FROM photos WHERE user_id = ?').get(u.id).n,
+    // Weekly check-ins, newest first: what was measured, proposed and answered.
+    dietCheckins: ctx.db.prepare('SELECT * FROM diet_checkins WHERE user_id = ? ORDER BY week DESC LIMIT 8').all(u.id)
+      .map((r) => ({ ...JSON.parse(r.data), status: r.status, result: r.result ? JSON.parse(r.result) : null, decidedAt: r.decided_at })),
   };
 });
 
@@ -1233,7 +1489,7 @@ route('POST', '/api/admin/cleanup', 'admin', (ctx) => {
 // check-ins, coach chat, feed, competition history) but keeps the accounts, passwords, sign-in
 // sessions and notification subscriptions, plus the food and exercise libraries and settings.
 // Everyone stays signed in and lands in setup again on their next open. Needs the exact phrase.
-const FRESH_START_TABLES = ['reactions', 'activity', 'competition_results', 'set_logs', 'cardio_logs', 'checkins', 'body_assessments',
+const FRESH_START_TABLES = ['reactions', 'activity', 'competition_results', 'diet_checkins', 'day_overrides', 'set_logs', 'cardio_logs', 'checkins', 'body_assessments',
   'photos', 'body_metrics', 'water_logs', 'day_swaps', 'meal_swaps', 'logs', 'change_requests', 'coach_messages', 'jobs_run', 'workout_plans', 'plans', 'profiles'];
 route('POST', '/api/admin/fresh-start', 'admin', (ctx) => {
   if (ctx.body.confirm !== 'START OVER') throw bad('Type START OVER to confirm');
@@ -1266,7 +1522,9 @@ const cleanFood = (b, existingId) => {
   const id = existingId ?? str(b.name, 60, 'name', true).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) + '-' + crypto.randomBytes(2).toString('hex');
   const roles = (Array.isArray(b.roles) ? b.roles : []).filter((r) => ['mainProtein', 'bfProtein', 'vegMain', 'carb', 'bfCarb', 'fruit', 'veg', 'fat', 'snack', 'boost'].includes(r));
   return {
-    id, name: str(b.name, 80, 'name', true), cat: oneOf(b.cat ?? 'protein', ['protein', 'carb', 'fat', 'veg', 'fruit', 'dairy'], 'cat'),
+    id, name: str(b.name, 80, 'name', true), cat: oneOf(b.cat ?? 'protein', ['protein', 'carb', 'fat', 'veg', 'fruit', 'dairy', 'legume', 'dish', 'sweet', 'snack', 'fastfood', 'meals', 'bakery', 'sweets', 'snacks', 'drinks', 'basics'], 'cat'),
+    // Off-plan foods (eating out, treats) can be logged but never go into plans or swaps.
+    offplan: Boolean(b.offplan),
     kcal: num(b.kcal, 0, 900, 'kcal'), p: num(b.p, 0, 100, 'p'), c: num(b.c, 0, 100, 'c'), f: num(b.f, 0, 100, 'f'),
     roles, tags: (Array.isArray(b.tags) ? b.tags : []).filter((t) => ALLERGEN_TAGS.includes(t) || t === 'pricey'), veg: Boolean(b.veg),
     step: num(b.step ?? 5, 1, 100, 'step'), max: num(b.max ?? 500, 1, 3000, 'max'),
@@ -1275,8 +1533,8 @@ const cleanFood = (b, existingId) => {
 
 route('POST', '/api/admin/foods', 'admin', (ctx) => {
   const f = cleanFood(ctx.body);
-  ctx.db.prepare('INSERT INTO foods (id,name,cat,kcal,p,c,f,roles,tags,veg,step,max,custom) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)')
-    .run(f.id, f.name, f.cat, f.kcal, f.p, f.c, f.f, JSON.stringify(f.roles), JSON.stringify(f.tags), f.veg ? 1 : 0, f.step, f.max);
+  ctx.db.prepare('INSERT INTO foods (id,name,cat,kcal,p,c,f,roles,tags,veg,step,max,offplan,custom) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)')
+    .run(f.id, f.name, f.cat, f.kcal, f.p, f.c, f.f, JSON.stringify(f.offplan ? [] : f.roles), JSON.stringify(f.tags), f.veg ? 1 : 0, f.step, f.max, f.offplan ? 1 : 0);
   audit(ctx.db, ctx.user.id, 'food.created', null, { id: f.id, name: f.name });
   return { ok: true, id: f.id };
 });
@@ -1327,6 +1585,8 @@ route('GET', '/api/admin/backup', 'admin', (ctx) => {
 // Crew (monthly competition, feed, recap) and training routes live in their own files.
 const social = registerSocial({ route, bad, notFound, forbidden, str, needDate, isDate, audit, todayUtc, scoresBetween, attendance, weekStart, pushToUser });
 dayChanged = social.dayChanged;
+// Adaptive weekly check-in (src/adaptive.js maths, src/api-checkin.js routes).
+registerCheckin({ route, bad, needDate, isDate, subjectId, audit, todayUtc, addDays, activePlan, savePendingPlan, makePendingPlan, targetsFor, effectiveTargets });
 ({ makePendingWorkoutPlan } = registerTrain({ route, bad, notFound, num, optNum, oneOf, str, needDate, isDate, subjectId, audit, addDays, todayUtc, dayChanged: (db, uid, date) => social.dayChanged(db, uid, date) }));
 
 // ---------- dispatcher ----------

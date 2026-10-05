@@ -126,8 +126,10 @@ export async function adminUser({ id }) {
         h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Daily targets'), h('button', { class: 'link', onclick: () => targetsSheet(id, d, run) }, 'Change')),
         h('p', { style: 'margin-top:12px' }, h('span', { class: 'num', style: 'font-size:40px' }, fmt(t.kcal)), ' kcal'),
         h('p', { class: 'sub' }, `Protein ${t.proteinG} g · Carbs ${t.carbsG} g · Fat ${t.fatG} g`),
-        t.overridden ? h('p', { class: 'sub' }, `Set by you. Calculated: ${fmt(d.computedTargets.kcal)} kcal.`) : null,
+        t.overridden ? h('p', { class: 'sub' }, `Set by you. Calculated: ${fmt(d.computedTargets.kcal)} kcal. Weekly check-ins are off while your targets are set.`) : null,
+        !t.overridden && d.computedTargets?.tdeeAdjust ? h('p', { class: 'sub' }, `Maintenance ${fmt(d.computedTargets.tdee)} kcal: ${d.computedTargets.tdeeAdjust > 0 ? '+' : '−'}${fmt(Math.abs(d.computedTargets.tdeeAdjust))} vs the formula, learned from weekly check-ins.`) : null,
         ...(t.warnings ?? []).map((w) => h('p', { class: 'notice', style: 'margin-top:8px' }, w))) : null,
+      d.dietCheckins?.length ? checkinHistory(d.dietCheckins) : null,
       d.scores.length ? h('section', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Last 14 days')), h('div', { style: 'margin-top:12px' }, scoreBars(d.scores, localDate()))) : null,
       d.profile ? h('section', { class: 'section' },
         h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Gym attendance'), h('span', { class: 'sub' }, `${d.attendance.attended} of ${d.attendance.planned} in 4 weeks`)),
@@ -162,6 +164,25 @@ export async function adminUser({ id }) {
           h('span', { class: 'grow' }, h('span', { class: 'strong', style: u.active ? 'color:var(--bad)' : '' }, u.active ? 'Deactivate account' : 'Reactivate account')), icon('chevR', 20))));
   }, run);
   await run();
+}
+
+/** Weekly check-ins (adaptive targets), newest first: what was measured and what was decided. */
+const CI_STATUS = { open: ['waiting', 'warn'], accepted: ['updated', 'ok'], kept: ['kept plan', ''], dismissed: ['seen', ''] };
+const CI_KIND = { proposed: 'Change proposed', on_track: 'On track', hold: 'No change' };
+const CI_HOLD = { under: 'ate under the plan', over: 'ate over the plan', floor: 'at the safe minimum', unclear: 'logs incomplete' };
+function checkinHistory(rows) {
+  const signed = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${Math.abs(n)}` : '0');
+  return h('section', { class: 'section' },
+    h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Weekly check-ins'), h('span', { class: 'sub' }, 'Adaptive calories')),
+    rows.map((c) => {
+      const [label, tone] = CI_STATUS[c.status] ?? [c.status, ''];
+      const kcal = c.result?.kcal ?? c.kcal;
+      return h('div', { class: 'list-row', style: 'cursor:default' },
+        h('span', { class: 'grow' },
+          h('span', { class: 'strong' }, `${fmtDate(c.week, { day: 'numeric', month: 'short' })} · ${kcal && kcal.to !== kcal.from ? `${fmt(kcal.from)} → ${fmt(kcal.to)} kcal` : `${CI_KIND[c.kind] ?? c.kind}${c.hold ? `: ${CI_HOLD[c.hold] ?? c.hold}` : ''}`}`),
+          h('span', { class: 'sub' }, `Trend ${c.trendKg} kg, ${signed(c.ratePerWeek)} kg/wk (goal ${signed(c.goalRate)}) · ate ${fmt(c.avgIntake)} kcal on ${c.days} logged days${c.maintenance ? ` · burn ≈ ${fmt(c.maintenance.measured)}` : ''}`)),
+        h('span', { class: `status ${tone}` }, label));
+    }));
 }
 
 function targetsSheet(id, d, done) {
@@ -262,13 +283,13 @@ export async function adminPlan({ id }) {
 export async function adminFoods() {
   const main = paint('admin', loading());
   const run = () => guard(main, async () => {
-    const { foods } = await api('GET', '/api/foods');
+    const { foods } = await api('GET', '/api/foods?offplan=1'); // diet foods and off-plan (eating out) foods
     const list = h('div', {});
     const q = h('input', { type: 'text', placeholder: 'Search foods', 'aria-label': 'Search foods' });
     const drawList = () => {
       const s = q.value.trim().toLowerCase();
       list.replaceChildren(...foods.filter((f) => !s || f.name.toLowerCase().includes(s)).map((f) => h('button', { class: 'list-row', onclick: () => foodSheet(f, run) },
-        h('span', { class: 'grow' }, h('span', { class: 'strong' }, f.name, f.custom ? ' · yours' : ''), h('span', { class: 'sub' }, `${fmt(f.kcal)} kcal · P ${f.p} · C ${f.c} · F ${f.f} per 100 g`)), icon('chevR', 20))));
+        h('span', { class: 'grow' }, h('span', { class: 'strong' }, f.name, f.custom ? ' · yours' : ''), h('span', { class: 'sub' }, `${f.offplan ? 'Eating out · logging only · ' : ''}${fmt(f.kcal)} kcal · P ${f.p} · C ${f.c} · F ${f.f} per 100 g`)), icon('chevR', 20))));
     };
     q.addEventListener('input', drawList);
     drawList();
@@ -281,10 +302,14 @@ export async function adminFoods() {
 
 function foodSheet(food, done) {
   sheet(food ? 'Edit food' : 'Add a food', (close) => {
-    const f = food ?? { name: '', cat: 'protein', kcal: '', p: '', c: '', f: '', roles: [], tags: [], veg: false, step: 5, max: 500 };
+    const f = food ?? { name: '', cat: 'protein', kcal: '', p: '', c: '', f: '', roles: [], tags: [], veg: false, step: 5, max: 500, offplan: false };
     const roles = new Set(f.roles); const tags = new Set(f.tags);
     const name = h('input', { type: 'text', value: f.name, 'aria-label': 'Food name' });
-    const cat = h('select', { 'aria-label': 'Category' }, [['protein', 'Protein'], ['dairy', 'Dairy'], ['carb', 'Carb'], ['fruit', 'Fruit'], ['veg', 'Vegetable'], ['fat', 'Fat']].map(([v, l]) => h('option', { value: v, selected: f.cat === v ? true : null }, l)));
+    const CATS = [['protein', 'Protein'], ['dairy', 'Dairy'], ['carb', 'Carb'], ['legume', 'Legumes'], ['dish', 'Cooked dish'], ['fruit', 'Fruit'], ['veg', 'Vegetable'], ['fat', 'Fat'], ['sweet', 'Sweet'], ['snack', 'Snack'],
+      ['fastfood', 'Log only: fast food & sandwiches'], ['meals', 'Log only: home & restaurant dishes'], ['bakery', 'Log only: bread & bakery'], ['sweets', 'Log only: sweets'], ['snacks', 'Log only: snacks'], ['drinks', 'Log only: drinks'], ['basics', 'Log only: sauces & extras']];
+    const cat = h('select', { 'aria-label': 'Category' }, CATS.map(([v, l]) => h('option', { value: v, selected: f.cat === v ? true : null }, l)));
+    // Off-plan: for logging only (pizza, sweets). Never used in plans, swaps or meal changes.
+    const offplan = h('input', { type: 'checkbox', checked: f.offplan ? true : null, disabled: food ? true : null, style: 'width:24px;height:24px' });
     const i = { kcal: numInput(f.kcal, { min: 0, max: 900 }), p: numInput(f.p, { min: 0, max: 100 }), c: numInput(f.c, { min: 0, max: 100 }), f: numInput(f.f, { min: 0, max: 100 }), step: numInput(f.step, { min: 1, max: 100 }), max: numInput(f.max, { min: 1, max: 3000 }) };
     const veg = h('input', { type: 'checkbox', checked: f.veg, style: 'width:24px;height:24px' });
     const toggles = (set, items) => h('div', { class: 'chips' }, items.map(([id, label]) => {
@@ -293,7 +318,7 @@ function foodSheet(food, done) {
       return b;
     }));
     const save = async () => {
-      const body = { name: name.value, cat: cat.value, kcal: i.kcal.value, p: i.p.value, c: i.c.value, f: i.f.value, step: i.step.value, max: i.max.value, veg: veg.checked, roles: [...roles], tags: [...tags] };
+      const body = { name: name.value, cat: cat.value, kcal: i.kcal.value, p: i.p.value, c: i.c.value, f: i.f.value, step: i.step.value, max: i.max.value, veg: veg.checked, roles: [...roles], tags: [...tags], offplan: offplan.checked };
       try { if (food) await api('PUT', `/api/admin/foods/${food.id}`, body); else await api('POST', '/api/admin/foods', body); close(); toast('Saved'); done(); } catch (e) { toast(e.message, 'bad'); }
     };
     return h('div', { class: 'stack' },
@@ -302,7 +327,8 @@ function foodSheet(food, done) {
       h('div', { class: 'grid2' }, field('Carbs (g)', i.c), field('Fat (g)', i.f)),
       h('div', { class: 'grid2' }, field('Round portions to (g)', i.step), field('Largest portion (g)', i.max)),
       h('label', { class: 'row-flex' }, veg, h('span', {}, 'Suitable for vegetarians')),
-      h('div', {}, h('p', { style: 'font-weight:600;margin-bottom:8px' }, 'Where plans may use it'), toggles(roles, ROLES)),
+      h('label', { class: 'row-flex' }, offplan, h('span', {}, 'Eating out / treat: for logging only, never in plans or swaps')),
+      f.offplan ? null : h('div', {}, h('p', { style: 'font-weight:600;margin-bottom:8px' }, 'Where plans may use it'), toggles(roles, ROLES)),
       h('div', {}, h('p', { style: 'font-weight:600;margin-bottom:8px' }, 'Contains'), toggles(tags, ALLERGENS)), h('div', {}, h('p', { style: 'font-weight:600;margin-bottom:8px' }, 'Price'), toggles(tags, [['pricey', 'Expensive (left out on a tight budget)']])),
       h('div', { class: 'row-flex' }, h('button', { class: 'btn', onclick: save }, 'Save'),
         food ? h('button', { class: 'btn danger', onclick: () => confirmSheet('Remove this food?', 'It disappears from the food list and new plans. Existing plans that use it keep working.', 'Remove', async () => { await api('DELETE', `/api/admin/foods/${food.id}`); close(); done(); }, true) }, 'Remove') : null));
@@ -373,7 +399,7 @@ export async function adminCheckins() {
     const review = async (c, status, undo = true) => {
       try {
         await api('POST', `/api/admin/checkins/${c.id}/review`, { status });
-        toast(status === 'approved' ? `${c.name}'s check-in counts again` : `${c.name}'s check-in revoked: 15 points removed`, '', undo ? { label: 'Undo', run: () => review(c, status === 'approved' ? 'rejected' : 'approved', false) } : null);
+        toast(status === 'approved' ? `${c.name}'s check-in counts again` : `${c.name}'s check-in revoked: 30 training points removed`, '', undo ? { label: 'Undo', run: () => review(c, status === 'approved' ? 'rejected' : 'approved', false) } : null);
         run();
       } catch (e) { toast(e.message, 'bad'); }
     };
@@ -394,7 +420,7 @@ export async function adminCheckins() {
     main.replaceChildren(
       back('/admin', 'Admin'),
       h('h1', { class: 'title' }, 'Gym check-ins'),
-      h('p', { class: 'sub', style: 'margin-top:-8px' }, 'Every gym photo counts straight away. Revoke any that look fake; the 15 points come off and the member is told.'),
+      h('p', { class: 'sub', style: 'margin-top:-8px' }, 'Every gym photo counts straight away. Revoke any that look fake; the 30 training points come off and the member is told.'),
       flagged.length ? h('section', { class: 'section' },
         h('div', { class: 'section-head' }, h('h2', { class: 'h2' }, 'Looks like a repeat'), h('span', { class: 'sub' }, `${flagged.length}`)),
         flagged.map((c) => card(c, [h('button', { class: 'btn small ghost', onclick: () => keep(c) }, 'It is fine'), h('button', { class: 'btn small danger', onclick: () => review(c, 'rejected') }, 'Revoke')]))) : null,
@@ -617,14 +643,29 @@ function testRow() {
     try {
       const r = await api('POST', '/api/admin/ai-benchmark', {});
       if (!r.ok) { bench.replaceChildren(h('p', { class: 'error' }, r.message)); return; }
-      bench.replaceChildren(...r.results.map((x) => h('div', { class: 'list-row' },
+      // Models this NVIDIA account cannot use are one line at the end, not a wall of red.
+      const missing = r.results.filter((x) => x.error?.startsWith('Not available'));
+      const tried = r.results.filter((x) => !missing.includes(x));
+      bench.replaceChildren(...tried.map((x) => h('div', { class: 'list-row' },
         h('span', { class: 'grow' }, h('span', { class: 'strong' }, x.model, x.model === r.current ? ' · in use' : ''),
-          h('span', { class: x.correct ? 'sub' : 'error' }, x.ok ? `${(x.ms / 1000).toFixed(1)} s · ${x.correct ? 'logs food correctly' : x.toolCall ? 'tool call was wrong' : 'did not use the tool'}` : x.error)),
+          h('span', { class: x.correct ? 'sub' : 'error' }, x.ok ? `${(x.ms / 1000).toFixed(1)} s · ${x.correct ? 'logged the meal correctly' : x.problem ?? (x.toolCall ? 'tool call was wrong' : 'did not use the tool')}` : x.error)),
         x.correct && x.model !== r.current ? h('button', { class: 'btn small', onclick: async () => {
           await api('PUT', '/api/admin/settings', { aiModel: x.model }); toast(`The coach now uses ${x.model}`); benchBtn.click();
-        } }, 'Use') : null)));
+        } }, 'Use') : null)),
+      missing.length ? h('p', { class: 'sub', style: 'padding-top:8px' }, `Not on your NVIDIA account: ${missing.map((x) => x.model).join(', ')}.`) : null,
+      h('p', { class: 'sub', style: 'padding-top:8px' }, 'Overloaded models are often free again later: run it again in a few minutes.'));
     } catch (e) { bench.replaceChildren(h('p', { class: 'error' }, e.message)); }
     finally { benchBtn.disabled = false; }
   } }, 'Find the fastest model');
-  return h('div', {}, h('div', { class: 'row-flex', style: 'padding:4px 0 8px' }, btn, benchBtn, out), bench);
+  // Any model by its NVIDIA ID (from build.nvidia.com), for one the benchmark did not list.
+  const idInput = h('input', { type: 'text', placeholder: 'e.g. moonshotai/kimi-k3', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Model ID' });
+  const useId = h('button', { class: 'btn small', onclick: async () => {
+    const id = idInput.value.trim();
+    if (!/^[\w.-]+\/[\w.:-]+$/.test(id)) { toast('Paste the full model ID, like nvidia/nemotron-3.5-lightning-30b-a3b', 'bad'); return; }
+    useId.disabled = true;
+    try { await api('PUT', '/api/admin/settings', { aiModel: id }); toast(`The coach now uses ${id}. Test it with "Test AI connection".`); }
+    catch (e) { toast(e.message, 'bad'); } finally { useId.disabled = false; }
+  } }, 'Use this model');
+  return h('div', {}, h('div', { class: 'row-flex', style: 'padding:4px 0 8px' }, btn, benchBtn, out), bench,
+    h('div', { class: 'stack', style: 'padding-top:8px' }, field('Use a specific model', idInput, 'The model ID as shown on build.nvidia.com. If it does not answer, the coach falls back to the next working model.'), useId));
 }

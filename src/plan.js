@@ -379,7 +379,9 @@ export function finishDay(dayNo, meals) {
 
 /** Context shared by the template and AI paths. */
 export function planContext({ prefs = {}, foods = FOODS }) {
-  const pool = filterFoods(foods, prefs);
+  // Foods with no meal roles (fried eggs, cheddar, pears...) are for logging and swaps only:
+  // the plan generator, AI menus and "Change meal" never build a meal from them.
+  const pool = filterFoods(foods, prefs).filter((f) => f.roles.length);
   return {
     pool,
     poolById: new Map(pool.map((f) => [f.id, f])),
@@ -693,9 +695,11 @@ export function mealsFromMenu(day, ctx) {
  *   consumed  macros already eaten that are not part of `meals` items being solved (logged items, extras)
  *   fixed     Set of "mi-ii" keys whose grams must not change (just swapped)
  *   skip      Set of "mi-ii" keys to leave out entirely (already logged)
+ *   direction -1: portions may only shrink, +1: only grow, 0: either (a weekly check-in that
+ *             cuts 150 kcal should never hand out a bigger portion of anything)
  * Returns { grams: Map("mi-ii" -> grams), projected: { kcal, p, c, f } }.
  */
-export function rebalanceDay({ meals, foodsById, targets, consumed = { kcal: 0, p: 0, c: 0, f: 0 }, fixed = new Set(), skip = new Set() }) {
+export function rebalanceDay({ meals, foodsById, targets, consumed = { kcal: 0, p: 0, c: 0, f: 0 }, fixed = new Set(), skip = new Set(), direction = 0 }) {
   const solveMeals = [];
   const keys = [];
   meals.forEach((m, mi) => {
@@ -706,7 +710,9 @@ export function rebalanceDay({ meals, foodsById, targets, consumed = { kcal: 0, 
       if (skip.has(key) || !food) return;
       const p = portionOf(food);
       const lock = fixed.has(key);
-      items.push({ food, step: p.step, typ: it.grams, min: lock ? it.grams : Math.min(p.min, it.grams), max: lock ? it.grams : Math.max(p.max, it.grams), grams: it.grams });
+      const min = lock || direction > 0 ? it.grams : Math.min(p.min, it.grams);
+      const max = lock || direction < 0 ? it.grams : Math.max(p.max, it.grams);
+      items.push({ food, step: p.step, typ: it.grams, min, max, grams: it.grams });
       keys.push([key, items[items.length - 1]]);
     });
     if (items.length) solveMeals.push({ items });

@@ -17,25 +17,88 @@ export const workoutPlanForDate = (db, uid, date) =>
   planRow(db.prepare("SELECT * FROM workout_plans WHERE user_id = ? AND status IN ('active','archived') AND start_date <= ? AND (end_date IS NULL OR end_date >= ?) ORDER BY version DESC LIMIT 1").get(uid, date, date));
 
 const checkinOn = (db, uid, date) => db.prepare('SELECT id, status, verdict FROM checkins WHERE user_id = ? AND date = ?').get(uid, date) ?? null;
+const overrideOn = (db, uid, date) => db.prepare('SELECT kind, weekday FROM day_overrides WHERE user_id = ? AND date = ?').get(uid, date) ?? null;
+
+/** Sessions in week order (Saturday first). */
+const inWeekOrder = (plan) => [...plan.data.days].sort((a, b) => WEEK_ORDER(a.weekday) - WEEK_ORDER(b.weekday));
+/** The session a rest day turned into a training day does by default: the next one in the week. */
+export function defaultSession(plan, date) {
+  const order = WEEK_ORDER(weekdayOf(date));
+  const days = inWeekOrder(plan);
+  return days.find((d) => WEEK_ORDER(d.weekday) > order) ?? days[0] ?? null;
+}
+
+/**
+ * The session for a date after the person's rest / training switch (day_overrides).
+ * Returns { day, override }: day is the plan session to do, or null for a rest day;
+ * override is 'rest' | 'train' | null (null = as planned).
+ */
+export function sessionFor(db, uid, plan, date, ov = overrideOn(db, uid, date)) {
+  if (!plan) return { day: null, override: null };
+  if (ov?.kind === 'rest') return { day: null, override: 'rest' };
+  if (ov?.kind === 'train') return { day: plan.data.days.find((d) => d.weekday === ov.weekday) ?? defaultSession(plan, date), override: 'train' };
+  return { day: plan.data.days.find((d) => d.weekday === weekdayOf(date)) ?? null, override: null };
+}
+
+/**
+ * Rest days earn the training points only up to the plan's rest days per week (7 - sessions),
+ * counted Saturday to Friday in date order. A day with a gym check-in never uses one up. So
+ * swapping a training day for a rest day is free if you train on a rest day instead, but simply
+ * skipping sessions and calling them rest days earns nothing. Returns { counts, allowed, used }.
+ */
+export function restAllowance(db, uid, date) {
+  const plan = workoutPlanForDate(db, uid, date);
+  if (!plan) return { counts: true, allowed: 7, used: 0 };
+  const allowed = Math.max(0, 7 - plan.data.days.length);
+  let used = 0;
+  for (let d = weekStart(date); d <= date; d = addDaysStr(d, 1)) {
+    const p = workoutPlanForDate(db, uid, d);
+    if (!p) continue; // before the first plan
+    const rest = !sessionFor(db, uid, p, d).day;
+    const trained = checkinOn(db, uid, d)?.status === 'approved';
+    if (!rest || trained) continue;
+    if (d === date) return { counts: used < allowed, allowed, used: used + 1 };
+    used++;
+  }
+  return { counts: true, allowed, used };
+}
 
 /**
  * Used by the day score. null when the person has no workout plan for that date.
- *   planned:    a session is scheduled on this weekday
- *   completion: logged sets / planned sets (0..1)
- *   checkin:    'approved' | 'pending' | 'rejected' | null (gym attendance photo)
+ *   planned:    a session is scheduled (after any rest / training switch)
+ *   completion: logged sets / planned sets (0..1); shown, not scored
+ *   checkin:    'approved' | 'pending' | 'rejected' | null (gym attendance photo: the 30 points)
+ *   restCounts: on a rest day, whether it is within the plan's rest days this week
  *   done:       at least half the planned sets are logged
  */
 export function workoutState(db, uid, date) {
   const plan = workoutPlanForDate(db, uid, date);
   if (!plan) return null;
   const checkin = checkinOn(db, uid, date)?.status ?? null;
-  const day = plan.data.days.find((d) => d.weekday === weekdayOf(date));
-  if (!day) return { planned: false, done: false, completion: 0, checkin };
+  const { day, override } = sessionFor(db, uid, plan, date);
+  const extraSession = checkin === 'approved' && isExtraSession(db, uid, plan, date, override);
+  if (!day) return { planned: false, done: false, completion: 0, checkin, override, restCounts: restAllowance(db, uid, date).counts, extraSession };
   const deload = isDeloadWeek(plan.start_date, date);
   const plannedSets = day.exercises.reduce((a, e) => a + (deload ? deloadSets(e.sets) : e.sets), 0);
   const logged = db.prepare('SELECT COUNT(*) n FROM set_logs WHERE user_id = ? AND date = ?').get(uid, date).n;
   const completion = plannedSets > 0 ? Math.min(1, logged / plannedSets) : 0;
-  return { planned: true, done: plannedSets > 0 && logged >= Math.ceil(plannedSets / 2), completion: Math.round(completion * 100) / 100, checkin };
+  return { planned: true, done: plannedSets > 0 && logged >= Math.ceil(plannedSets / 2), completion: Math.round(completion * 100) / 100, checkin, override, restCounts: true, extraSession };
+}
+
+/**
+ * A session on top of the plan (the +10 bonus): a check-in on a day the plan has as a rest day,
+ * left as planned (a rest day switched to a training day is a MOVED session, not an extra one),
+ * in a week where no planned session was turned into a rest day. Without that last rule, moving
+ * Monday's session to Tuesday by "resting" Monday would earn the bonus for the same work.
+ */
+export function isExtraSession(db, uid, plan, date, override = overrideOn(db, uid, date)?.kind ?? null) {
+  if (override) return false;
+  if (plan.data.days.some((d) => d.weekday === weekdayOf(date))) return false; // a planned training day
+  for (let d = weekStart(date); d <= date; d = addDaysStr(d, 1)) {
+    const p = workoutPlanForDate(db, uid, d);
+    if (p && overrideOn(db, uid, d)?.kind === 'rest' && p.data.days.some((x) => x.weekday === weekdayOf(d))) return false;
+  }
+  return true;
 }
 
 const lastSession = (db, uid, exId, date) => {
@@ -66,7 +129,7 @@ export function attendance(db, uid, from, to) {
   const approved = new Set(db.prepare("SELECT date FROM checkins WHERE user_id = ? AND status = 'approved' AND date BETWEEN ? AND ?").all(uid, from, to).map((r) => r.date));
   for (let d = from; d <= to; d = addDaysStr(d, 1)) {
     const plan = workoutPlanForDate(db, uid, d);
-    const isPlanned = Boolean(plan?.data.days.some((x) => x.weekday === weekdayOf(d)));
+    const isPlanned = Boolean(plan && sessionFor(db, uid, plan, d).day);
     if (isPlanned) planned++;
     if (approved.has(d)) attended++;
   }
@@ -87,7 +150,7 @@ export function registerTrain(c) {
   /** After sets are logged: post a finished session once every planned set is in. */
   function sessionFeed(db, uid, date) {
     const plan = workoutPlanForDate(db, uid, date);
-    const day = plan?.data.days.find((d) => d.weekday === weekdayOf(date));
+    const day = sessionFor(db, uid, plan, date).day;
     if (!day) return;
     const planned = day.exercises.reduce((a, e) => a + e.sets, 0);
     const logged = db.prepare('SELECT COUNT(*) n FROM set_logs WHERE user_id = ? AND date = ?').get(uid, date).n;
@@ -296,7 +359,7 @@ export function registerTrain(c) {
     if (date >= addDays(todayUtc(), -1) && rotateIfDue(ctx.db, uid, plan, date)) plan = workoutPlanForDate(ctx.db, uid, date);
     const deload = Boolean(plan) && isDeloadWeek(plan.start_date, date);
     const pending = Boolean(ctx.db.prepare("SELECT id FROM workout_plans WHERE user_id = ? AND status = 'pending'").get(uid));
-    const day = plan ? plan.data.days.find((d) => d.weekday === weekdayOf(date)) ?? null : null;
+    const { day, override } = sessionFor(ctx.db, uid, plan, date);
     const exById = new Map(loadExercises(ctx.db, { includeInactive: true }).map((e) => [e.id, e]));
     const logged = ctx.db.prepare('SELECT * FROM set_logs WHERE user_id = ? AND date = ? ORDER BY exercise_id, set_no').all(uid, date);
     const byEx = new Map();
@@ -335,11 +398,17 @@ export function registerTrain(c) {
     const week = Array.from({ length: 7 }, (_, i) => {
       const d = addDays(ws, i);
       const p = workoutPlanForDate(ctx.db, uid, d); // days before the first plan are not planned
-      const s = p?.data.days.find((x) => x.weekday === weekdayOf(d));
-      return { date: d, planned: Boolean(s), name: s?.name ?? null, checkin: approvedDates.get(d) ?? null };
+      const { day: s, override: o } = sessionFor(ctx.db, uid, p, d);
+      return { date: d, planned: Boolean(s), name: s?.name ?? null, checkin: approvedDates.get(d) ?? null, override: o };
     });
     return {
       date, hasPlan: Boolean(plan), hasPending: pending, dayName: day?.name ?? null, focus: day?.focus ?? null, minutes: day?.minutes ?? null, restDay: Boolean(plan) && !day,
+      // The rest / training switch: what the plan says, what was switched, and the sessions to pick from.
+      override, plannedSession: plan ? plan.data.days.find((x) => x.weekday === weekdayOf(date))?.name ?? null : null,
+      sessionWeekday: day?.weekday ?? null, sessions: plan ? inWeekOrder(plan).map((x) => ({ weekday: x.weekday, name: x.name })) : [],
+      rest: plan && !day ? restAllowance(ctx.db, uid, date) : null,
+      // Training on this planned rest day would be an extra session: +10 on top of the 30.
+      extraBonus: plan && !day ? isExtraSession(ctx.db, uid, plan, date, override) : false,
       split: plan?.data.split ?? null, notes: plan?.data.notes ?? [], cardioPlan: day ? plan.data.cardio ?? null : null,
       warmup, blocks, cardio, week,
       cycle: plan && plan.data.format === 2 ? { week: Math.max(1, planWeek(plan.start_date, date)), of: CYCLE_WEEKS, deload, rotation: plan.data.rotation ?? 0 } : null,
@@ -382,13 +451,42 @@ export function registerTrain(c) {
     return { ok: true, ...r };
   });
 
+  // One-tap rest / training day switch, for today or the coming week (not the past: scores of
+  // past days stay as they were). kind: 'rest' | 'train' | 'plan' (back to what the plan says).
+  // 'train' on a rest day does the session planned on `weekday` (default: the next one this week).
+  route('POST', '/api/train/day', 'user', (ctx) => {
+    const uid = subjectId(ctx, ctx.body);
+    const date = needDate(ctx.body.date);
+    const today = isDate(ctx.body.today) ? ctx.body.today : todayUtc();
+    if (date < today || date > addDays(today, 6)) throw bad('You can switch today or the next 6 days.');
+    const kind = oneOf(ctx.body.kind, ['rest', 'train', 'plan'], 'kind');
+    const plan = workoutPlanForDate(ctx.db, uid, date) ?? activeWorkoutPlan(ctx.db, uid);
+    if (!plan) throw bad('You have no training plan yet.');
+    const planned = plan.data.days.find((d) => d.weekday === weekdayOf(date)) ?? null;
+    const clear = () => ctx.db.prepare('DELETE FROM day_overrides WHERE user_id = ? AND date = ?').run(uid, date);
+    const set = (k, wd = null) => ctx.db.prepare(`INSERT INTO day_overrides (user_id, date, kind, weekday) VALUES (?, ?, ?, ?)
+      ON CONFLICT (user_id, date) DO UPDATE SET kind = excluded.kind, weekday = excluded.weekday`).run(uid, date, k, wd);
+    if (kind === 'plan') clear();
+    else if (kind === 'rest') {
+      if (checkinOn(ctx.db, uid, date)?.status === 'approved') throw bad('You checked in at the gym today, so it counts as a training day.');
+      if (planned) set('rest'); else clear();
+    } else {
+      const wd = ctx.body.weekday === undefined || ctx.body.weekday === null ? (planned ? planned.weekday : defaultSession(plan, date)?.weekday) : Math.round(num(ctx.body.weekday, 0, 6, 'session'));
+      if (!plan.data.days.some((d) => d.weekday === wd)) throw bad('That session is not in your plan.');
+      if (planned && planned.weekday === wd) clear(); else set('train', wd);
+    }
+    dayChanged(ctx.db, uid, date);
+    const { day, override } = sessionFor(ctx.db, uid, plan, date);
+    return { ok: true, date, restDay: !day, dayName: day?.name ?? null, override };
+  });
+
   // "Done as planned": log every remaining planned set of an exercise at one weight × reps.
   route('POST', '/api/train/exercise/complete', 'user', (ctx) => {
     const uid = subjectId(ctx, ctx.body);
     const date = needDate(ctx.body.date);
     const exId = knownExercise(ctx, ctx.body.exerciseId);
     const plan = workoutPlanForDate(ctx.db, uid, date);
-    const p = plan?.data.days.find((d) => d.weekday === weekdayOf(date))?.exercises.find((e) => e.exerciseId === exId);
+    const p = sessionFor(ctx.db, uid, plan, date).day?.exercises.find((e) => e.exerciseId === exId);
     const sets = Math.round(num(ctx.body.sets ?? p?.sets ?? 3, 1, 20, 'sets'));
     const weightKg = num(ctx.body.weightKg ?? 0, 0, 600, 'weight');
     const reps = Math.round(num(ctx.body.reps ?? p?.repMin, 1, 500, 'reps'));
@@ -593,7 +691,7 @@ export function registerTrain(c) {
     audit(ctx.db, ctx.user.id, `checkin.${status}_by_admin`, row.user_id, { date: row.date });
     checkinFeed(ctx.db, row.user_id, row.date, status);
     // Only tell the member when something changed for them (an admin "it is fine" is silent).
-    if (status !== row.status) pushToUser(ctx.db, row.user_id, { title: 'FitCrew', body: status === 'approved' ? `Gym check-in for ${row.date} counts again. Points added back.` : `Gym check-in for ${row.date} was revoked by the admin${reason ? `: ${reason}` : ''}. The 15 points were removed.`, url: '/#/train', tag: 'checkin' }).catch(() => {});
+    if (status !== row.status) pushToUser(ctx.db, row.user_id, { title: 'FitCrew', body: status === 'approved' ? `Gym check-in for ${row.date} counts again. Points added back.` : `Gym check-in for ${row.date} was revoked by the admin${reason ? `: ${reason}` : ''}. The 30 training points were removed.`, url: '/#/train', tag: 'checkin' }).catch(() => {});
     return { ok: true };
   });
 

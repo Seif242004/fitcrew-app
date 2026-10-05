@@ -173,10 +173,13 @@ function hallOfFame(champions) {
 
 function howSheet(month) {
   sheet('How points work', () => h('div', { class: 'guide' },
-    [['40', 'Calories within 10% of your target (20) and protein at 90% or more (20).'],
-      ['20', 'Eating the planned items (swaps and adjusted amounts count).'],
+    [['40', 'Calories within 10% of your target (20) and protein at 90% or more (20), counted from diet food only (your plan, swaps, and diet foods you add).'],
+      ['20', 'Meals matched: each meal\'s diet food compared with its plan (calories, protein, carbs, fat). Within 10% is full marks, then 1% lost per 1% off; bigger meals count for more. A different meal with the same macros still scores.'],
       ['10', 'Logging on the day itself.'],
-      ['30', 'Training days: 15 for an approved gym check-in, 15 for ticking off the planned sets. Rest days give the full 30 when the day is logged.']]
-      .map(([k, v]) => h('div', { class: 'guide-row' }, h('span', { class: 'rxc static' }, `${k} pts`), h('p', {}, v))),
-    h('p', { class: 'sub' }, `Up to 100 points a day, added up over the calendar month. Whoever has the most points on ${fmtDate(month.to, { day: 'numeric', month: 'long' })} wins ${month.name}; ties go to more 70+ days. Every month starts from zero. Weight is never scored.`)));
+      ['30', 'A gym check-in on the Train tab: one photo is all 30, whatever you train (gym, CrossFit, a class). Logging sets is optional, for your records. Rest days give the 30 when the day is logged, for as many rest days as your plan has each week.'],
+      ['+10', 'Extra session: a gym check-in on a planned rest day (not when you made a training day a rest day that week).'],
+      ['−', 'Going over your calories when cutting (more than 5%) or maintaining (more than 10%) costs 1 point per % over, up to 30. Everything you ate counts here. Bulking has no penalty.']]
+      .map(([k, v]) => h('div', { class: 'guide-row' }, h('span', { class: 'rxc static' }, k === '−' ? 'Over' : `${k} pts`), h('p', {}, v))),
+    h('p', { class: 'sub' }, 'Food you add on top of the plan or eat out (a coffee, pizza, sweets) counts toward your calories but never earns points: only the plan does.'),
+    h('p', { class: 'sub' }, `Up to 100 points a day (110 with an extra session), added up over the calendar month. Whoever has the most points on ${fmtDate(month.to, { day: 'numeric', month: 'long' })} wins ${month.name}; ties go to more 70+ days. Every month starts from zero. Weight is never scored.`)));
 }
