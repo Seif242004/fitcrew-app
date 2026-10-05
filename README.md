@@ -17,28 +17,38 @@ It runs as an installable PWA on the crew's phones and is hosted on Cloudflare's
 - **Plan generator**: realistic Egyptian meal templates plus one bounded least-squares solve over the whole day (projected coordinate descent), so every portion stays inside a realistic serving range while the day hits kcal, protein, carbs and fat. Countable foods come in whole units (3 eggs, 1½ loaves); rice and pasta are given dry.
 - **The day makes sense to a normal person**: lunch is the one cooked meal (molokhia, mahshi, stews, koshari), dinner is light and reuses lunch's protein ("cook once, eat twice"), and breakfast holds breakfast foods. A deterministic checker enforces this on every plan, including AI-proposed menus.
 - **Swaps the way dietitians do them** (بدائل): any item swaps for an equivalent on its key macro, and any meal swaps for another complete meal with the same calories, for today or for good.
-- **Logging in natural units**: "3 eggs", "1 plate of koshari", "1½ cups of rice", "70 g dry", with a live calorie preview. Overate? *Rebalance* trims the rest of the day within realistic portions.
+- **Logging in natural units**: "3 eggs", "1 plate of koshari", "1½ cups of rice", "70 g dry", "100 ml", "1 sachet", with a live calorie preview. Overate? *Rebalance* trims the rest of the day within realistic portions.
+- **351 foods, no duplicates**: plan foods; everyday diet foods that are valid swaps but never put in a plan (fried or scrambled eggs, cheddar, feta, more fish and fruit); and logging-only foods (coffee and tea drinks, juices, sauces, bakery, home dishes, Egyptian street sandwiches, fast food, sweets). Search handles Arabic letter variants, Egyptian spellings (balady, koshary, ta3meya), plurals and any word order.
+- **Food goes in its meal**: the Nescafé with breakfast, the juice with lunch. One server route resolves a whole meal as people say it (food lookup, spoken units, matching the plan's items or a same-kind stand-in, and a repeat guard), used by both the app and the coach.
+- **Adaptive weekly check-in**: every Friday the weight trend (EMA plus a least-squares rate) and the logged intake give a measured maintenance; when progress is too slow or too fast it proposes a capped calorie change and re-sizes the same plan, only after the member accepts.
 
 **Training engine**
 - Split selection (PPL, Arnold, upper/lower, anterior/posterior, full body; chosen by an LLM or rules), intensity-based set budgets, RIR and tempo, warm-ups, post-workout cardio by goal.
 - Double progression with a suggested weight × reps for every set, a 7-week cycle with a deload, then the next cycle drafted automatically.
 - Gym check-ins with perceptual-hash duplicate detection, a rest timer scheduled on the audio clock, and an offline queue that replays set ticks and food logs in order.
+- One tap turns a day into a rest day or a training day; rest days earn points only up to the plan's rest days per week, so skipping sessions never pays.
 
 **Crew and coach**
-- Daily score out of 100 (calories, protein, plan adherence, same-day logging, training), streaks, a monthly competition with a prize and hall of fame, a crew feed with reactions, weekly recaps.
-- AI coach over an OpenAI-compatible API with **30+ tools** (log food, swap a meal, rebalance, log sets, change the split...). It acts *as the user* through the same routes as the app, and can never reach admin routes. Everyday messages ("log lunch", "drank 2 glasses") are parsed locally without the LLM.
+- **Daily score out of 100**: calories and protein from diet food, how closely each meal matched its plan (kcal, protein, carbs, fat, weighted by meal size), same-day logging, and the gym check-in. Off-plan food counts toward calories but never earns; going over target costs points when cutting or maintaining; training on a planned rest day adds a bonus. Tap the score for the breakdown.
+- Streaks, a monthly competition with a prize and hall of fame, a crew feed with reactions, weekly recaps.
+- AI coach over an OpenAI-compatible API with **35+ tools** (log a meal, swap a meal, rebalance, log sets, change the split...). It acts *as the user* through the same routes as the app, and can never reach admin routes. Everyday messages ("log lunch", "drank 2 glasses") are parsed locally without the LLM.
+- Built to be reliable on small, free models: the server does the unit maths and plan matching, a turn that reports food without a tool call is nudged once, replies follow the language of the last message, and tool calls that models write as text in their own format (Kimi, DeepSeek, Hermes-style) are recovered. An admin benchmark sends a real multi-item meal report to every available model and picks by correctness and speed, with automatic fallbacks.
 - An "AI admin" auto-approves plans only when they pass deterministic safety and common-sense rules; everything else goes to a human.
 - Scheduled check-ins and Web Push implemented from scratch (VAPID + aes128gcm with `node:crypto`).
 
 ## Screenshots
 
-| Today | Log in natural units | Change a meal | Training |
+| Today | Log in natural units | Add food or a drink to a meal | Change a meal |
 |---|---|---|---|
-| <img src="docs/screenshots/today-dark.png" width="200"> | <img src="docs/screenshots/amount-dark.png" width="200"> | <img src="docs/screenshots/changemeal-dark.png" width="200"> | <img src="docs/screenshots/train-dark.png" width="200"> |
+| <img src="docs/screenshots/today-dark.png" width="200"> | <img src="docs/screenshots/amount-dark.png" width="200"> | <img src="docs/screenshots/add-dark.png" width="200"> | <img src="docs/screenshots/changemeal-dark.png" width="200"> |
 
-| Meal plan | Crew competition | Profile | Light theme |
+| Today's points | Training | Meal plan | Crew competition |
 |---|---|---|---|
-| <img src="docs/screenshots/plan-dark.png" width="200"> | <img src="docs/screenshots/crew-dark.png" width="200"> | <img src="docs/screenshots/profile-dark.png" width="200"> | <img src="docs/screenshots/today-light.png" width="200"> |
+| <img src="docs/screenshots/points-dark.png" width="200"> | <img src="docs/screenshots/train-dark.png" width="200"> | <img src="docs/screenshots/plan-dark.png" width="200"> | <img src="docs/screenshots/crew-dark.png" width="200"> |
+
+| Profile | Light theme |
+|---|---|
+| <img src="docs/screenshots/profile-dark.png" width="200"> | <img src="docs/screenshots/today-light.png" width="200"> |
 
 ## Architecture
 
@@ -56,10 +66,13 @@ Browser PWA (public/)  ──►  /api/*  ──►  src/api.js (route table)  �
 | `src/calc.js` | BMR, TDEE, calorie target and macros (shared with the browser) |
 | `src/plan.js` | Meal templates, portion solver, day rules, whole-meal alternatives, rebalancing |
 | `src/exchange.js`, `src/measures.js` | Food exchanges and household units (eggs, loaves, cups, plates) |
+| `src/foods-seed.js`, `src/offplan-foods.js`, `src/search.js` | Food database (diet, everyday and logging-only foods) and Arabic / English search |
+| `src/food-log.js` | Meals, spoken units and plan matching for logging a whole meal in one call |
+| `src/adaptive.js`, `src/api-checkin.js` | Adaptive weekly check-in: weight trend, measured maintenance, capped calorie changes |
 | `src/workout.js`, `src/api-train.js` | Exercise library, splits, progression, cycles, check-ins |
-| `src/coach.js`, `src/plan-ai.js`, `src/split-ai.js` | LLM coach (tool calling), AI menu proposals, split choice; every AI output is validated |
+| `src/coach.js`, `src/tool-calls.js`, `src/plan-ai.js`, `src/split-ai.js` | LLM coach (tool calling, text tool-call recovery, model fallbacks), AI menu proposals, split choice; every AI output is validated |
 | `src/review.js` | Deterministic plan review (the "AI admin") |
-| `src/social.js`, `src/adherence.js` | Scoring, streaks, monthly competition, feed |
+| `src/adherence.js`, `src/social.js` | Day score (meal match, over-target penalty, bonus), streaks, monthly competition, feed |
 | `src/push.js`, `src/jobs.js` | Web Push from scratch, scheduled check-ins |
 | `public/` | Vanilla ES-module front end, design tokens, light and dark themes, service worker |
 
@@ -71,7 +84,7 @@ Requires **Node.js 22.13+**. Nothing to install.
 
 ```bash
 npm start      # http://localhost:3000, create the admin account on first open
-npm test       # 120+ tests (node:test)
+npm test       # 160+ tests (node:test)
 ```
 
 On Windows, `start-dev.cmd` and `test.cmd` do the same with a double-click. The AI features are optional: put `FITCREW_AI_KEY=...` in a git-ignored `fitcrew.env` to enable them.
