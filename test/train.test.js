@@ -175,7 +175,7 @@ test('a missed planned session scores zero for training; a rest day is not penal
   const scores = (await sam.get(`/api/adherence?days=7&today=${WED}`)).body.scores;
   const by = Object.fromEntries(scores.map((s) => [s.date, s]));
   assert.equal(by[MON].parts.workout, 0, 'planned Monday session was skipped');
-  assert.equal(by[TUE].parts.workout, 30, 'Tuesday is a rest day, full marks');
+  assert.equal(by[TUE].parts.workout, 20, 'Tuesday is a rest day: 20 (training earns 30)');
   assert.equal(by[WED].parts.workout, 0, 'planned Wednesday session was skipped');
   assert.ok(by[TUE].total > by[MON].total);
 });

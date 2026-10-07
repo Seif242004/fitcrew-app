@@ -9,6 +9,8 @@
 // name, then words found inside the Arabic name, the id or other words. Diet foods always come
 // before off-plan foods (pizza, burgers, sweets) so the plan's own foods are never pushed down.
 
+import { SEARCH_KEYWORDS } from './offplan-more.js';
+
 const AR_NORMAL = [[/[\u064B-\u0652\u0640]/g, ''], [/[أإآ]/g, 'ا'], [/ة/g, 'ه'], [/ى/g, 'ي'], [/ؤ/g, 'و'], [/ئ/g, 'ي']];
 
 /** Lower case, Arabic letter variants folded, accents and punctuation removed, single spaces. */
@@ -47,7 +49,8 @@ const ALIASES = {
 };
 
 // Everyday staples win ties ("bread" -> baladi bread first, "rice" -> white rice first).
-const COMMON = new Set(['baladi-bread', 'eggs', 'white-rice', 'chicken-breast', 'ful-medames', 'taameya', 'white-cheese', 'pasta', 'potato', 'koshari', 'banana', 'apple', 'milk', 'coffee-black', 'tea', 'orange-juice', 'sugar', 'cappuccino']);
+const COMMON = new Set(['baladi-bread', 'eggs', 'white-rice', 'chicken-breast', 'ful-medames', 'taameya', 'white-cheese', 'pasta', 'potato', 'koshari', 'banana', 'apple', 'milk', 'coffee-black', 'tea', 'orange-juice', 'sugar', 'cappuccino',
+  'fried-chicken', 'chicken-nuggets', 'beef-shawarma', 'beef-burger', 'fries', 'pizza-margherita', 'kfc-original', 'big-mac-style', 'zinger']);
 
 /** Word variants to try: the word itself, its alias, and the singular of a plural. */
 function variants(w) {
@@ -64,7 +67,8 @@ function variants(w) {
 const prep = (f) => {
   const name = norm(f.name);
   const ar = norm(f.ar);
-  const other = norm(`${String(f.id).replace(/-/g, ' ')} ${f.cat ?? ''}`);
+  // Search-only words: chain and brand names people type ("big mac", "zinger", "nutella").
+  const other = norm(`${String(f.id).replace(/-/g, ' ')} ${f.cat ?? ''} ${SEARCH_KEYWORDS[f.id] ?? ''}`);
   return { id: f.id, name, ar, nameWords: name.split(' '), arWords: ar ? ar.split(' ') : [], otherWords: other.split(' ') };
 };
 
@@ -77,7 +81,10 @@ function score(p, q, words) {
   for (const w of words) {
     const vs = variants(w);
     const starts = (list) => list.some((x) => vs.some((v) => x.startsWith(v)));
-    const inside = (list) => w.length >= 4 && list.some((x) => vs.some((v) => x.includes(v)));
+    // Inside a word only for what was typed (or its singular), never an alias: "pepsi" -> "cola"
+    // must not match "chocolate".
+    const own = vs.filter((v) => v === w || w.startsWith(v));
+    const inside = (list) => w.length >= 4 && list.some((x) => own.some((v) => x.includes(v)));
     if (starts(p.nameWords)) total += 10;
     else if (starts(p.arWords)) total += 9;
     else if (starts(p.otherWords)) total += 5;
@@ -108,6 +115,7 @@ export function searchFoods(foods, query, limit = 8) {
 
 // Words that describe how a food was served rather than what it is ("shredded cheddar", "a hot
 // cup of tea"); dropped when the full name finds nothing.
+const ARTICLES = new Set(['a', 'an', 'the', 'some', 'my', 'from', 'at']);
 const FILLER = new Set(['a', 'an', 'the', 'of', 'with', 'some', 'my', 'little', 'bit', 'shredded', 'grated', 'sliced', 'chopped', 'fresh', 'homemade', 'home', 'made', 'hot', 'cold', 'iced', 'small', 'large', 'big', 'medium', 'piece', 'pieces', 'plate', 'cup', 'glass', 'mug', 'bowl', 'serving', 'portion', 'normal', 'regular', 'plain', 'warm']);
 
 /**
@@ -117,8 +125,13 @@ const FILLER = new Set(['a', 'an', 'the', 'of', 'with', 'some', 'my', 'little', 
 export function findFood(foods, name) {
   const words = norm(name).split(' ').filter(Boolean);
   if (!words.length) return null;
-  const tries = [words.join(' '), words.filter((w) => !FILLER.has(w)).join(' ')];
-  const core = words.filter((w) => !FILLER.has(w));
+  // Without articles first ("a big mac" -> "big mac"), so a filler word that is part of a name
+  // ("big") is only dropped when nothing else matched.
+  const tries = [words.join(' '), words.filter((w) => !ARTICLES.has(w)).join(' '), words.filter((w) => !FILLER.has(w)).join(' ')];
+  // A count is rarely part of the name ("6 nuggets"), but sometimes is ("nescafe 3 in 1"), so
+  // it is dropped only after the full name found nothing.
+  const core = words.filter((w) => !FILLER.has(w) && !/^\d+$/.test(w));
+  tries.push(core.join(' '));
   for (let n = core.length - 1; n >= 1; n--) tries.push(core.slice(0, n).join(' '), core.slice(-n).join(' '));
   for (const q of tries) {
     if (!q) continue;

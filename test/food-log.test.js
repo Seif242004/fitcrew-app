@@ -234,9 +234,9 @@ test('points: only plan food earns, going over costs points when cutting or main
   assert.equal(overPenalty('bulk', 3000, 2000), 0, 'bulking: no penalty');
   assert.equal(overPenalty('cut', 2090, 2000), 0, 'within the margin');
   assert.equal(overPenalty('cut', 5000, 2000), 30, 'capped');
-  const bonus = dayScore({ targets, consumed: all(2000, 150), planConsumed: all(2000, 150), itemsTotal: 10, itemsDone: 10, loggedSameDay: true, workout: { planned: false, checkin: 'approved', extraSession: true } });
-  assert.equal(bonus.parts.bonus, 10);
-  assert.equal(bonus.total, 110);
+  const bonus = dayScore({ targets, consumed: all(2000, 150), planConsumed: all(2000, 150), itemsTotal: 10, itemsDone: 10, loggedSameDay: true, workout: { planned: false, checkin: 'approved' } });
+  assert.equal(bonus.parts.workout + bonus.parts.bonus, 30, 'gym on a rest day: 20 + 10, the same as a training day');
+  assert.equal(bonus.total, 100);
   assert.equal(dayScore({ targets, consumed: all(6000, 0), planConsumed: all(0, 0), itemsTotal: 10, itemsDone: 0, loggedSameDay: false, workout: { planned: true, checkin: null } }).total, 0, 'never below 0');
 
   // Through the API: extras do not raise the score, a swap to an off-plan food is not plan food.
@@ -260,7 +260,7 @@ test('points: only plan food earns, going over costs points when cutting or main
   assert.ok((await score()).parts.over < 0);
 });
 
-test('a gym check-in on a planned rest day adds 10, unless a session was moved to it', async (t) => {
+test('a gym check-in on a rest day adds 10 to the rest day\'s 20: always 30, like a training day', async (t) => {
   const app = await boot(); t.after(app.close);
   const plan = (await app.call('GET', '/api/workout-plan')).body.plan;
   const sat = addDays(D, -1); // Saturday
@@ -270,17 +270,20 @@ test('a gym check-in on a planned rest day adds 10, unless a session was moved t
   const scoreOn = async (d) => (await app.call('GET', `/api/adherence?days=14&today=${week.at(-1)}`)).body.scores.find((s) => s.date === d);
   await app.call('POST', '/api/log/foods', { date: rest[0], today: rest[0], meal: 'lunch', items: [{ foodId: 'chicken-breast', grams: 170 }] });
   await app.call('POST', `/api/admin/users/${app.user.id}/checkins`, { date: rest[0] });
-  assert.equal((await scoreOn(rest[0])).parts.bonus, 10);
+  const r0 = (await scoreOn(rest[0])).parts;
+  assert.deepEqual([r0.workout, r0.bonus], [20, 10]);
   // A training day switched to rest earlier in the week: training on a rest day is the moved session.
   const laterRest = rest.find((d) => d > train[0]);
   app.db.prepare("INSERT INTO day_overrides (user_id, date, kind) VALUES (?, ?, 'rest')").run(app.user.id, train[0]);
   await app.call('POST', '/api/log/foods', { date: laterRest, today: laterRest, meal: 'lunch', items: [{ foodId: 'chicken-breast', grams: 170 }] });
   await app.call('POST', `/api/admin/users/${app.user.id}/checkins`, { date: laterRest });
-  assert.equal((await scoreOn(laterRest)).parts.bonus, 0);
+  const lr = (await scoreOn(laterRest)).parts;
+  assert.equal(lr.workout + lr.bonus, 30, 'a moved session still earns 30, never more');
   // A check-in on a planned training day is the normal 30, no bonus.
   const t2 = train.find((d) => d !== train[0]);
   await app.call('POST', `/api/admin/users/${app.user.id}/checkins`, { date: t2 });
-  assert.equal((await scoreOn(t2)).parts.bonus, 0);
+  const t2p = (await scoreOn(t2)).parts;
+  assert.deepEqual([t2p.workout, t2p.bonus], [30, 0]);
 });
 
 test('meal match: each meal scores by how close its diet food came to the plan', async (t) => {

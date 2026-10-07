@@ -20,9 +20,12 @@ const F = (id, name, ar, cat, kcal, p, c, f, roles, o = {}) => ({
   tags: o.tags ?? [], veg: o.veg ?? false, step: o.step ?? 5,
   max: o.portion ? o.portion[2] : (o.max ?? 500), portion: o.portion ?? null, unit: o.unit ?? null, est: o.est ?? false, raw: o.raw ?? null,
 });
+import { MORE_DIET_FOODS } from './foods-more.js';
+
 const V = { veg: true };
 
-export const FOODS = [
+// The original list; MORE_DIET_FOODS (foods-more.js) adds the session-13 staples after it.
+const BASE_FOODS = [
   // ---------------------------------------------------------------- poultry & meat
   F('chicken-breast', 'Chicken breast, grilled', 'صدور فراخ مشوية', 'protein', 165, 31, 0, 3.6, ['mainProtein'], { tags: ['poultry'], step: 10, portion: [120, 170, 250] }),
   F('chicken-thigh', 'Chicken thigh, grilled, skinless', 'أوراك فراخ مشوية', 'protein', 179, 24.8, 0, 8.2, ['mainProtein'], { tags: ['poultry'], step: 10, portion: [120, 160, 230] }),
@@ -106,7 +109,7 @@ export const FOODS = [
   F('sweet-potato', 'Sweet potato, baked', 'بطاطا', 'carb', 90, 2, 21, 0.2, ['carb'], { ...V, step: 10, portion: [150, 220, 350] }),
 
   // ---------------------------------------------------------------- Egyptian dishes (complete plates)
-  F('koshari', 'Koshari', 'كشري', 'dish', 93, 3.3, 17, 2, ['dish'], { tags: ['gluten'], ...V, step: 50, portion: [250, 350, 450], est: true }),
+  F('koshari', 'Koshari', 'كشري', 'dish', 150, 4.5, 25, 3.5, ['dish'], { tags: ['gluten'], ...V, step: 50, portion: [200, 300, 400], est: true }), // rice, lentils, pasta, fried onions and oil: about 450 kcal a 300 g box
   F('molokhia', 'Molokhia', 'ملوخية', 'dish', 60, 3, 4, 3.5, ['side'], { ...V, portion: [250, 250, 375], unit: { g: 250, name: 'bowl' }, est: true }),
   F('mahshi', 'Mahshi (stuffed vegetables)', 'محشي', 'dish', 150, 3, 22, 5.5, ['carb'], { ...V, step: 50, portion: [150, 250, 350], est: true }),
   F('fattah', 'Fattah with meat', 'فتة باللحمة', 'dish', 210, 9, 22, 9, ['dish'], { tags: ['meat', 'gluten'], step: 50, portion: [250, 350, 450], est: true }),
@@ -230,6 +233,9 @@ export const FOODS = [
   F('popcorn', 'Popcorn, air-popped', 'فشار', 'snack', 387, 13, 78, 4.5, ['snack'], { ...V, step: 5, portion: [15, 25, 40] }),
   F('cola', 'Cola', 'كولا', 'sweet', 42, 0, 10.6, 0, ['sweet'], { ...V, step: 50, portion: [330, 330, 330], unit: { g: 330, name: 'can' } }),
 ];
+
+// `measures` only lives in code (measures.js reads it by id), so it is left off the food rows.
+export const FOODS = [...BASE_FOODS, ...MORE_DIET_FOODS.map(({ measures, ...f }) => f)];
 
 /** Food groups people can exclude. The key is the tag stored on each food. */
 export const EXCLUDE_GROUPS = [

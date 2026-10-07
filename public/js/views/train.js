@@ -131,7 +131,7 @@ function build(d, ctx) {
     h('h1', { class: 'title', style: 'margin-bottom:2px' }, d.dayName ?? (d.restDay ? 'Rest day' : 'Train')),
     h('p', { class: 'sub' }, `${date === today ? 'Today' : fmtDate(date, { weekday: 'long' })} · ${fmtDate(date, { day: 'numeric', month: 'long' })}${d.focus ? ` · ${d.focus}` : ''}${d.minutes ? ` · about ${d.minutes} min` : ''}`),
     weekBar(d, ctx),
-    d.hasPlan ? screenTip('train', 'How training works', 'Check in with a gym photo for your 30 training points; any training counts. Logging sets is optional: tap an exercise to open it, tick sets for your records and PRs. Resting today instead? Switch the day to a rest day.') : null);
+    d.hasPlan ? screenTip('train', 'How training works', 'Check in with a gym photo for your 30 training points; any training counts. A logged rest day is 20. Logging sets is optional: tap an exercise to open it, tick sets for your records and PRs. Resting today instead? Switch the day to a rest day.') : null);
 
   if (!d.hasPlan && !d.blocks.length) {
     return [head, d.hasPending
@@ -203,11 +203,11 @@ function checkinCard(d, ctx) {
   const ci = d.checkin;
   const isToday = ctx.date === ctx.today;
   if (!isToday && !ci) return d.restDay ? null : h('div', { class: 'strip', 'data-tone': 'muted' }, h('span', { class: 'ico' }, icon('camera', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'No gym check-in'), h('span', { class: 'sub' }, 'Check-ins can only be sent on the day.')));
-  if (ci?.status === 'approved') return h('div', { class: 'strip done' }, h('span', { class: 'ico' }, icon('check', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Checked in at the gym'), h('span', { class: 'sub' }, d.state?.extraSession ? '+30 training points and +10 for an extra session' : '+30 training points for today')));
+  if (ci?.status === 'approved') return h('div', { class: 'strip done' }, h('span', { class: 'ico' }, icon('check', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Checked in at the gym'), h('span', { class: 'sub' }, d.restDay ? '20 for the rest day + 10 for training: 30 points' : '+30 training points for today')));
   // 'pending' only exists on check-ins sent before photos were auto-approved.
   if (ci?.status === 'pending') return h('div', { class: 'strip', 'data-tone': 'warn' }, h('span', { class: 'ico' }, icon('clock', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Check-in sent'), h('span', { class: 'sub' }, 'Waiting for the admin.')));
   if (!isToday) return h('div', { class: 'strip', 'data-tone': 'bad' }, h('span', { class: 'ico' }, icon('close', 22)), h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Check-in revoked'), h('span', { class: 'sub' }, ci.reason || 'The admin removed this check-in. Ask them if this looks wrong.')));
-  if (d.restDay && !ci) return h('p', { class: 'sub', style: 'margin-top:12px' }, 'Trained anyway? ', h('button', { class: 'link', onclick: () => capture({ ...ctx, extraBonus: d.extraBonus }) }, d.extraBonus ? 'Check in for 30 + 10 bonus points' : 'Check in for 30 points'));
+  if (d.restDay && !ci) return h('p', { class: 'sub', style: 'margin-top:12px' }, 'Trained anyway? ', h('button', { class: 'link', onclick: () => capture({ ...ctx, restDay: true }) }, 'Check in for +10 (30 in all)'));
 
   const rejected = ci?.status === 'rejected';
   return h('div', { class: `checkin ${rejected ? 'rejected' : ''}` },
@@ -230,7 +230,7 @@ function capture(ctx, btn) {
       const image = await shrink(file, { max: 720, quality: 0.7, maxBytes: 150_000 });
       const ahash = await averageHash(image);
       const r = await api('POST', '/api/checkins', { date: ctx.today, image, ahash });
-      toast(r.status === 'approved' ? (ctx.extraBonus ? 'Checked in. +30 points and +10 for an extra session' : 'Checked in. +30 points') : 'Check-in sent');
+      toast(r.status === 'approved' ? (ctx.restDay ? 'Checked in. Rest day + gym: 30 points' : 'Checked in. +30 points') : 'Check-in sent');
       ctx.reload();
     } catch (e) {
       toast(e.message, 'bad');
@@ -618,10 +618,10 @@ function cardioSheet(ctx) {
 
 function restCard(d, ctx) {
   const next = d.week.find((x) => x.date > ctx.date && x.planned);
-  // Rest days earn the 30 training points up to the plan's rest days per week (see restAllowance).
+  // Rest days earn 20 training points up to the plan's rest days per week (see restAllowance).
   const r = d.rest;
   const points = !r ? null : r.counts
-    ? h('p', { class: 'meta', style: 'margin-top:8px' }, `Log your planned food today and this rest day earns the 30 training points (rest day ${r.used} of ${r.allowed} this week).`)
+    ? h('p', { class: 'meta', style: 'margin-top:8px' }, `Log your food today and this rest day earns 20 points (rest day ${r.used} of ${r.allowed} this week). Train and check in for 30.`)
     : h('p', { class: 'notice', style: 'margin-top:8px' }, `Extra rest day: your plan has ${r.allowed} a week, so today earns no training points. Train today and check in, or train on a rest day later this week.`);
   return h('section', { class: 'section' },
     h('p', { class: 'sub' }, 'Recovery is where you grow. Walk, sleep 7–9 hours, hit your protein.'),

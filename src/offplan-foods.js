@@ -12,6 +12,9 @@
 // fast-food and bakery entries and the published nutrition of the big chains sold in Egypt.
 // Portions are typical servings there. Marked est: true; the admin can edit any value.
 //
+// (Since session 13 they can earn points inside a meal that still matches its plan; see
+// OFFPLAN_MEAL_MATCH in adherence.js.)
+//
 // Fields as in foods-seed.js; `unit` is the natural count (1 slice, 1 nugget, 1 can) and
 // `measures` are extra ways to log it ([name, plural, grams, half]).
 
@@ -24,7 +27,10 @@ const O = (id, name, ar, cat, kcal, p, c, f, unit, o = {}) => ({
 const M = (name, plural, g, half = false) => [name, plural, g, half];
 const V = { veg: true };
 
-export const OFFPLAN_FOODS = [
+import { MORE_OFFPLAN_FOODS } from './offplan-more.js';
+
+// The original list; MORE_OFFPLAN_FOODS (offplan-more.js) adds chains, street food and more.
+const BASE_OFFPLAN = [
   // ---------------------------------------------------------------- pizza & pasta
   O('pizza-margherita', 'Pizza, margherita (cheese)', 'بيتزا مارجريتا', 'fastfood', 266, 11.4, 33.3, 9.7, ['slice', 107], { tags: ['gluten', 'dairy'], ...V, m: [M('personal pizza', 'personal pizzas', 300), M('medium pizza', 'medium pizzas', 640)] }),
   O('pizza-pepperoni', 'Pizza, pepperoni', 'بيتزا بيبروني', 'fastfood', 298, 12.9, 32.3, 12.9, ['slice', 110], { tags: ['gluten', 'dairy', 'meat'], m: [M('personal pizza', 'personal pizzas', 310), M('medium pizza', 'medium pizzas', 660)] }),
@@ -222,6 +228,8 @@ export const OFFPLAN_FOODS = [
   O('fruit-yogurt', 'Fruit yogurt', 'زبادي بالفواكه', 'snacks', 95, 3.5, 15, 2.5, ['cup', 105], { tags: ['dairy'], ...V }),
   O('popcorn-butter', 'Popcorn, buttered (cinema)', 'فشار بالزبدة', 'snacks', 500, 8, 55, 28, ['small bag', 40], { tags: ['dairy'], ...V }),
 ];
+
+export const OFFPLAN_FOODS = [...BASE_OFFPLAN, ...MORE_OFFPLAN_FOODS];
 
 /** Extra measures by id, in measures.js format: { id: [{ name, plural, g, half }] }. */
 export const OFFPLAN_MEASURES = Object.fromEntries(OFFPLAN_FOODS.filter((f) => f.measures.length)

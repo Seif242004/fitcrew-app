@@ -15,15 +15,15 @@ const CARDS = () => {
     { ic: 'spark', title: 'Welcome to FitCrew', lines: ['Your diet plan, your training and the crew, in one app.', 'This takes a minute. Swipe or tap Next.'] },
     { ic: 'today', title: 'Today', lines: ['Tick each food as you eat it. One tap, no typing.', 'Ate a different amount? Tap ⋯ and say it the normal way: 3 eggs, 1½ loaves, 2 cups of rice.', 'Had a coffee or a juice with a meal? "Add food or drink" under that meal.'] },
     { ic: 'plan', title: 'Your plan', lines: ['One simple day, the Egyptian way: lunch is the cooked meal, dinner is light and made from what was cooked.', 'Swap any food for an equivalent, or tap "Change meal" for a whole different meal with the same calories.', 'Rice and pasta are weighed dry, the way dietitians write it.'] },
-    { ic: 'train', title: 'Train', lines: ['At the gym, tap "Check in" and snap a photo: that is all 30 training points. Gym, CrossFit or a class all count.', 'Resting today instead? Switch the day to a rest day in one tap.', 'Logging sets is optional: tap an exercise to open it, ▶ shows how to do it.'] },
-    { ic: 'trophy', title: 'Points and the monthly prize', lines: ['Up to 100 points a day: calories and protein 40, how close each meal is to its plan 20 (diet food only), logging on the day 10, gym check-in 30. Training on a rest day adds 10.', priv ? 'You are a private member: only the admin sees your points.' : 'Points add up over the month. Most points on the last day wins the prize.', '70+ in a day keeps your streak going.'] },
+    { ic: 'train', title: 'Train', lines: ['At the gym, tap "Check in" and snap a photo: that is all 30 training points. Gym, CrossFit or a class all count.', 'Resting today instead? Switch the day to a rest day in one tap: a logged rest day is 20.', 'Logging sets is optional: tap an exercise to open it, ▶ shows how to do it.'] },
+    { ic: 'trophy', title: 'Points and the monthly prize', lines: ['Up to 100 points a day: calories and protein 40, how close each meal is to its plan 20, logging on the day 10, gym check-in 30 (a logged rest day 20). Your water target adds 5, up to 7.', priv ? 'You are a private member: only the admin sees your points.' : 'Points add up over the month. Most points on the last day wins the prize.', '70+ in a day keeps your streak going.'] },
     { ic: 'coach', title: 'Your coach', lines: ['Just type: "I ate my lunch", "swap the rice", "what is my workout?".', 'It logs, swaps and adjusts for you, and checks in morning and evening.', 'Photos are never sent to the chat coach.'] },
     { ic: 'group', title: priv ? 'Progress' : 'Progress and the crew', lines: ['Weigh in on Fridays: the weekly check-in uses it to fine-tune your calories. Add photos every few weeks in Progress; they stay private.', priv ? 'Nobody else can see you anywhere in the app.' : 'Crew shows the board and what everyone is doing. Add a profile picture from Profile so the crew sees you.', 'Pull down on Today or Crew to refresh. Replay this tour any time from Profile.'] },
   ];
 };
 
 // Bump when the app gains something worth a short "What's new" for people who already took the tour.
-const TOUR_VERSION = 6;
+const TOUR_VERSION = 7;
 // The cards each version added. People see every version newer than the one they last saw.
 const NEW_IN = () => ({
   2: [
@@ -44,7 +44,12 @@ const NEW_IN = () => ({
   6: [
     { ic: 'plus', title: 'Food and drinks go in their meal', lines: ['Every meal has "Add food or drink": the Nescafé with breakfast, the juice with lunch. It shows inside that meal.', 'About 150 more foods: coffee and tea drinks, juices, sauces, breads, cheeses, street sandwiches and home dishes.'] },
     { ic: 'coach', title: 'Tell the coach, the way you would say it', lines: ['"Egg sandwich for breakfast: 100 g bread, 2 eggs, a slice of cheddar, and a Nescafé with milk."', 'It logs each part in that meal, ticks what matches your plan and never logs the same thing twice.'] },
-    { ic: 'trophy', title: 'Points got fairer', lines: ['Each meal earns by how close it is to its plan: calories, protein, carbs and fat. Off-plan food still counts toward calories but earns nothing. Tap your score on Today to see how it adds up.', 'Cutting or maintaining: going well over your calories costs points. Training on a planned rest day: +10 bonus.'] },
+    { ic: 'trophy', title: 'Points got fairer', lines: ['Each meal earns by how close it is to its plan: calories, protein, carbs and fat. Tap your score on Today to see how it adds up.', 'Cutting or maintaining: going well over your calories costs points.'] },
+  ],
+  7: [
+    { ic: 'drop', title: 'Water earns points', lines: ['Drink your daily water target for 5 points. More adds a little, less for each extra litre: 6 L on a 3 L target is 7, and that is the most.', 'Tap the glasses on Today, or tell the coach "I drank 2 glasses".'] },
+    { ic: 'clock', title: 'Rest days are 20, training is 30', lines: ['A logged rest day earns 20 training points. Train on a rest day and check in for +10, the same 30 as a training day.'] },
+    { ic: 'plus', title: 'Eat out, still log it, still score', lines: ['635 foods now: burger and chicken chains ("big mac", "zinger", "nuggets"), pizza, feteer, street sandwiches, sweets, snacks and drinks.', 'Put it in the meal you had it as: if that meal still matches its plan, it earns like your plan food.'] },
   ],
 });
 const WHATS_NEW = (seen) => {

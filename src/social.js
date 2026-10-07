@@ -202,13 +202,19 @@ export function registerSocial(c) {
 
   // ------------------------------------------------ weekly recap
   // The week in numbers. On Fridays it covers the week so far, otherwise the last full week.
-  const PART_MAX = { calories: 20, protein: 20, meals: 20, logging: 10, workout: 30 };
+  const PART_MAX = { calories: 20, protein: 20, meals: 20, logging: 10, workout: 30, water: 5 };
+  // A day's share of a part's points. Training: a logged rest day (20, no gym) is full marks for
+  // that day, so a plan with more rest days is never called weak on training.
+  const partShare = (k, p) => (k === 'workout'
+    ? ((p.workout ?? 0) + (p.bonus ?? 0)) / (p.workout === 20 && !p.bonus ? 20 : 30)
+    : Math.min(1, (p[k] ?? 0) / PART_MAX[k]));
   const PART_TIP = {
     calories: 'Calories were the weak spot. Log meals as you eat them and use "Rebalance" when a meal runs big.',
     protein: 'Protein was the weak spot. Never skip the protein item; swap it instead.',
     meals: 'Meals were often far from their plan. Eat each meal close to its plan (or swap what you do not like) instead of skipping or doubling it.',
     logging: 'Logging late cost points. A quick "I ate my lunch" to the coach counts.',
     workout: 'Training points were the weak spot. Check in at the gym on training days: the photo is all 30 points, whatever you train.',
+    water: 'Water was the easy points left on the table. Drink your daily target for 5 points a day; keep a bottle with you.',
     over: 'Going over your calories cost points this week. Log extras into their meal as you have them, and tap Rebalance when a meal runs big.',
   };
   function recap(db, uid, today) {
@@ -222,7 +228,7 @@ export function registerSocial(c) {
     const sets = db.prepare('SELECT s.exercise_id, s.weight_kg, s.reps, e.name FROM set_logs s LEFT JOIN exercises e ON e.id = s.exercise_id WHERE s.user_id = ? AND s.date BETWEEN ? AND ?').all(uid, from, to);
     if (!me.points && !sets.length) return null; // nothing logged all week: no recap to show
     const visible = competing(all).filter((r) => !r.hidden || r.userId === uid);
-    const parts = Object.keys(PART_MAX).map((k) => ({ part: k, avg: me.scores.reduce((a, s) => a + (s.parts[k] ?? 0), 0) / me.scores.length }));
+    const parts = Object.keys(PART_MAX).map((k) => ({ part: k, avg: (me.scores.reduce((a, s) => a + partShare(k, s.parts), 0) / me.scores.length) * PART_MAX[k] }));
     const overAvg = me.scores.reduce((a, s) => a + (s.parts.over ?? 0), 0) / me.scores.length;
     const weakest = overAvg <= -5 ? { part: 'over' } : parts.filter((p) => p.avg < PART_MAX[p.part] * 0.85).sort((a, b) => a.avg / PART_MAX[a.part] - b.avg / PART_MAX[b.part])[0];
     const best = sets.reduce((b, s) => (e1rm(s.weight_kg, s.reps) > (b?.score ?? 0) ? { name: s.name ?? s.exercise_id, weightKg: s.weight_kg, reps: s.reps, score: e1rm(s.weight_kg, s.reps) } : b), null);

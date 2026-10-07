@@ -16,12 +16,13 @@ test('training points: the gym check-in earns all 30; logging sets earns nothing
   assert.equal(dayScore({ ...day, workout: { planned: true, completion: 1, checkin: null } }).parts.workout, 0, 'all sets, no check-in');
   assert.equal(dayScore({ ...day, workout: { planned: true, completion: 0.5, checkin: 'approved' } }).parts.workout, 30);
   assert.equal(dayScore({ ...day, workout: { planned: true, completion: 1, checkin: 'pending' } }).parts.workout, 0, 'a pending check-in counts once approved');
-  assert.equal(dayScore({ ...day, workout: { planned: false, checkin: 'approved' } }).parts.workout, 30, 'trained on a rest day');
+  const restGym = dayScore({ ...day, workout: { planned: false, checkin: 'approved' } });
+  assert.deepEqual([restGym.parts.workout, restGym.parts.bonus], [20, 10], 'trained on a rest day: 20 for the rest day + 10 for the gym');
 });
 
-test('rest days earn 30 only within the plan\'s rest days for the week', () => {
+test('rest days earn 20 only within the plan\'s rest days for the week', () => {
   const day = { ...base, consumed: { kcal: 2200, p: 170 }, itemsDone: 10 };
-  assert.equal(dayScore({ ...day, workout: { planned: false, checkin: null, restCounts: true } }).parts.workout, 30);
+  assert.equal(dayScore({ ...day, workout: { planned: false, checkin: null, restCounts: true } }).parts.workout, 20, 'resting is worth less than training');
   assert.equal(dayScore({ ...day, workout: { planned: false, checkin: null, restCounts: false } }).parts.workout, 0, 'an extra rest day');
   assert.equal(dayScore({ ...day, workout: { planned: false, checkin: 'approved', restCounts: false } }).parts.workout, 30, 'a check-in always counts');
 });

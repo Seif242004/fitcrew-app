@@ -12,7 +12,7 @@ import { vapidKeys, pushToUser } from './push.js';
 import { ALLERGEN_TAGS } from './foods-seed.js';
 import { loadFoods, rowToFood } from './db.js';
 import { hashPassword, verifyPassword, newToken, hashToken, newInviteCode, checkPasswordStrength } from './auth.js';
-import { dayScore, streak, mealMatch } from './adherence.js';
+import { dayScore, streak, mealMatch, waterPoints, OFFPLAN_MEAL_MATCH } from './adherence.js';
 import { registerTrain, workoutState, attendance, weekStart } from './api-train.js';
 import { registerSocial } from './social.js';
 import { registerCheckin } from './api-checkin.js';
@@ -251,9 +251,15 @@ const offplanIds = (db) => new Set(db.prepare('SELECT id FROM foods WHERE offpla
 const isPlanLog = (l, off) => !l.ref.startsWith('extra:') && l.status !== 'skipped' && !(l.status === 'swapped' && off.has(l.food_id));
 const isDietExtra = (l, off) => l.ref.startsWith('extra:') && l.food_id && !off.has(l.food_id);
 
+// Eating-out food (pizza, a shawarma, a latte) eaten IN a meal counts like diet food when the meal,
+// with it, still matches its plan (OFFPLAN_MEAL_MATCH); otherwise it only counts toward calories.
+const isOffMealLog = (l, off) => Boolean(l.food_id) && off.has(l.food_id) && (l.ref.startsWith('extra:') || l.status === 'swapped');
+const addMacros = (to, l) => { for (const k of ['kcal', 'p', 'c', 'f']) to[k] += l[k]; };
+
 /**
- * Each meal's plan (after "just today" swaps and trims) and the diet food eaten in it.
- * Returns [{ name, planned: {kcal,p,c,f}, eaten: {kcal,p,c,f}, logged }].
+ * Each meal's plan (after "just today" swaps and trims) and the food that counts for it: diet food,
+ * plus eating-out food logged in the meal when the meal still matches its plan.
+ * Returns [{ name, planned: {kcal,p,c,f}, eaten: {kcal,p,c,f}, logged, offLogs, offCounted }].
  */
 function mealTotals(db, uid, plan, date, logs, off) {
   const { idx, meals } = dayMeals(db, uid, plan, date);
@@ -262,22 +268,34 @@ function mealTotals(db, uid, plan, date, logs, off) {
   const byRef = new Map(logs.map((l) => [l.ref, l]));
   return meals.map((m, mi) => {
     const planned = { kcal: 0, p: 0, c: 0, f: 0 }; const eaten = { kcal: 0, p: 0, c: 0, f: 0 };
+    const offLogs = [];
     let logged = false;
     m.items.forEach((it, ii) => {
       const ref = `${idx}-${mi}-${ii}`;
       const sw = swaps.get(ref); const sf = sw && foods.get(sw.food_id);
       const item = sf ? itemFor(sf, sw.grams) : it;
-      for (const k of ['kcal', 'p', 'c', 'f']) planned[k] += item[k];
+      addMacros(planned, item);
       const l = byRef.get(ref);
       if (l) logged = true;
-      if (l && isPlanLog(l, off)) for (const k of ['kcal', 'p', 'c', 'f']) eaten[k] += l[k];
+      if (l && isPlanLog(l, off)) addMacros(eaten, l);
+      else if (l && isOffMealLog(l, off)) offLogs.push(l); // "ate a pizza instead" of this item
     });
     for (const l of logs) {
       if (l.meal !== mi || !l.ref.startsWith('extra:')) continue;
       logged = true;
-      if (isDietExtra(l, off)) for (const k of ['kcal', 'p', 'c', 'f']) eaten[k] += l[k];
+      if (isDietExtra(l, off)) addMacros(eaten, l);
+      else if (isOffMealLog(l, off)) offLogs.push(l);
     }
-    return { name: m.name, planned, eaten, logged };
+    let offCounted = false;
+    if (offLogs.length) {
+      const withOff = { ...eaten };
+      for (const l of offLogs) addMacros(withOff, l);
+      // Counted only when it helps: a latte on top of a full breakfast never costs meal points
+      // (eating over the day's target is what the over-target penalty is for).
+      const m = mealMatch(planned, withOff) ?? 0;
+      if (m >= OFFPLAN_MEAL_MATCH && m >= (mealMatch(planned, eaten) ?? 0)) { offCounted = true; Object.assign(eaten, withOff); }
+    }
+    return { name: m.name, planned, eaten, logged, offLogs, offCounted };
   });
 }
 
@@ -285,15 +303,17 @@ function scoreDay(db, uid, date, plan, targets) {
   const logs = db.prepare('SELECT * FROM logs WHERE user_id = ? AND date = ?').all(uid, date);
   const consumed = sumLogs(logs);
   const off = offplanIds(db);
-  const dietLogs = logs.filter((l) => isPlanLog(l, off) || isDietExtra(l, off));
   const meals = mealTotals(db, uid, plan, date, logs, off);
+  // Diet food, plus eating-out food in meals that still matched their plan.
+  const dietLogs = [...logs.filter((l) => isPlanLog(l, off) || isDietExtra(l, off)), ...meals.flatMap((m) => (m.offCounted ? m.offLogs : []))];
   const itemsDone = logs.filter((l) => isPlanLog(l, off)).length;
   const goal = targets.goal ?? (JSON.parse(db.prepare('SELECT data FROM profiles WHERE user_id = ?').get(uid)?.data ?? '{}').goal);
-  const s = dayScore({ targets: { kcal: targets.kcal, proteinG: targets.proteinG, goal }, consumed, planConsumed: sumLogs(dietLogs), itemsTotal: 0, itemsDone, meals, loggedSameDay: logs.some((l) => l.logged_on === date), workout: workoutState(db, uid, date) });
+  const s = dayScore({ targets: { kcal: targets.kcal, proteinG: targets.proteinG, goal }, consumed, planConsumed: sumLogs(dietLogs), itemsTotal: 0, itemsDone, meals, loggedSameDay: logs.some((l) => l.logged_on === date), workout: workoutState(db, uid, date), water: waterFor(db, uid, date) });
   return {
     date, total: s.total, parts: s.parts, consumed: roundMacros(consumed),
-    // Per meal: how close it came to its plan (null until something is logged in it).
-    meals: meals.map((m) => ({ name: m.name, match: m.logged ? Math.round((mealMatch(m.planned, m.eaten) ?? 0) * 100) : null })),
+    // Per meal: how close it came to its plan (null until something is logged in it), and whether
+    // eating-out food in it counted (true), did not because the meal was too far off (false), or none was eaten (null).
+    meals: meals.map((m) => ({ name: m.name, match: m.logged ? Math.round((mealMatch(m.planned, m.eaten) ?? 0) * 100) : null, offCounted: m.offLogs.length ? m.offCounted : null })),
   };
 }
 
@@ -456,7 +476,12 @@ route('GET', '/api/foods', 'user', (ctx) => {
   const out = (list) => list.map((f) => ({ ...f, units: unitsFor(f), treat: isTreat(f) }));
   if (!ctx.query.has('q')) return { foods: out(foods) };
   const q = ctx.query.get('q');
-  if (norm(q)) return { foods: out(searchFoods(foods, q, 40)) };
+  // Diet foods first, but never so many that eating-out matches fall off the list ("chicken"
+  // must still reach nuggets and shawarma): up to 20 diet foods and 40 others.
+  if (norm(q)) {
+    const hits = searchFoods(foods, q, 400);
+    return { foods: out([...hits.filter((f) => !f.offplan).slice(0, 20), ...hits.filter((f) => f.offplan).slice(0, 40)]) };
+  }
   // Empty search in Add food: recent foods, and the drinks people add all the time.
   const popular = withOff && ctx.query.get('popular') === '1'
     ? out(POPULAR.map((id) => foods.find((f) => f.id === id)).filter(Boolean)) : undefined;
@@ -539,7 +564,7 @@ route('GET', '/api/today', 'user', (ctx) => {
   // (older logs, or a meal that no longer exists after a plan change).
   const extraOf = (l) => {
     const lf = l.food_id ? foodsById.get(l.food_id) : null;
-    return { ref: l.ref, name: l.name, foodId: l.food_id, grams: l.grams, offplan: Boolean(lf?.offplan), meal: l.meal ?? null, amount: l.amount ?? (lf && l.grams ? describeAmount(lf, l.grams) : l.grams ? `${l.grams} g` : null), kcal: Math.round(l.kcal), p: r1(l.p), c: r1(l.c), f: r1(l.f) };
+    return { ref: l.ref, name: l.name, foodId: l.food_id, grams: l.grams, offplan: Boolean(lf?.offplan), treat: isTreat(lf), meal: l.meal ?? null, amount: l.amount ?? (lf && l.grams ? describeAmount(lf, l.grams) : l.grams ? `${l.grams} g` : null), kcal: Math.round(l.kcal), p: r1(l.p), c: r1(l.c), f: r1(l.f) };
   };
   const allExtras = logs.filter((l) => l.ref.startsWith('extra:')).sort((a, b) => a.id - b.id).map(extraOf);
   meals.forEach((m, mi) => { m.extras = allExtras.filter((e) => e.meal === mi); });
@@ -729,12 +754,16 @@ function waterFor(db, uid, date) {
   const kg = prof ? JSON.parse(prof.data).weightKg : 75;
   const target = Math.min(4500, Math.max(2500, Math.round((kg * 40) / 250) * 250));
   const ml = db.prepare('SELECT ml FROM water_logs WHERE user_id = ? AND date = ?').get(uid, date)?.ml ?? 0;
-  return { ml, target };
+  // Points for this much water (5 at the target, up to 7), the same number the day's score uses.
+  return { ml, target, points: Math.round(waterPoints(ml, target) * 10) / 10 };
 }
 
 route('POST', '/api/water', 'user', (ctx) => {
   const uid = subjectId(ctx, ctx.body);
   const date = needDate(ctx.body.date);
+  // Water earns points, so it is logged on the day (yesterday still allowed, for time zones and a
+  // late-night glass), never added to older days or ahead.
+  if (date < addDays(todayUtc(), -1) || date > addDays(todayUtc(), 1)) throw bad('Water can only be logged for today or yesterday.');
   const cur = waterFor(ctx.db, uid, date).ml;
   const ml = ctx.body.set !== undefined ? Math.round(num(ctx.body.set, 0, 10000, 'set')) : Math.max(0, cur + Math.round(num(ctx.body.add, -5000, 5000, 'add')));
   ctx.db.prepare('INSERT INTO water_logs (user_id, date, ml) VALUES (?, ?, ?) ON CONFLICT(user_id, date) DO UPDATE SET ml = excluded.ml').run(uid, date, Math.min(ml, 10000));

@@ -214,7 +214,7 @@ function build({ d, tr, scores, date, today, ui, act, extra }) {
     trainingOpen ? workoutRow(tr, true) : null,
     overBanner(d, act),
     // The weigh-in prompt sits after the next meal, so food stays the first thing on screen.
-    ...d.meals.flatMap((m, i) => [mealPanel(m, i, ui, act, i === next, (scores.get(date) ?? d.score)?.meals?.[i]?.match ?? null), i === Math.max(next, 0) ? [checkinOrWeighIn(extra, today, act), recapCard(extra.recap, act)] : null]),
+    ...d.meals.flatMap((m, i) => [mealPanel(m, i, ui, act, i === next, (scores.get(date) ?? d.score)?.meals?.[i] ?? null), i === Math.max(next, 0) ? [checkinOrWeighIn(extra, today, act), recapCard(extra.recap, act)] : null]),
     extrasPanel(d.extras, act),
     askBar(act),
     trainingOpen ? null : workoutRow(tr, date === today),
@@ -364,6 +364,13 @@ function askBar(act) {
   return h('div', { class: 'askbar' }, h('span', { class: 'ico' }, icon('coach', 20)), input, h('button', { class: 'send', 'aria-label': 'Send to coach', onclick: go }, icon('send', 18)));
 }
 
+/** "2.5 of 5 pts" under the target, "5 + 1.1 pts" past it, "7 pts · max" at the cap. */
+function waterLabel(w) {
+  const r = (n) => (Math.round(n * 10) / 10).toLocaleString('en-US');
+  if (w.ml < w.target) return `${r(w.points)} of 5 pts`;
+  return w.points >= 6.95 ? '7 pts · max' : `5 + ${r(w.points - 5)} pts`;
+}
+
 /** Water: 250 ml glasses; tap the next empty glass to add, tap a full one to remove. */
 function waterCard(w, act) {
   if (!w) return null;
@@ -372,7 +379,9 @@ function waterCard(w, act) {
   const L = (ml) => (ml / 1000).toLocaleString('en-US', { maximumFractionDigits: 2 });
   return h('section', { class: 'section water' },
     h('div', { class: 'meal-head' },
-      h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Water'), h('span', { class: 'sub' }, `${L(w.ml)} of ${L(w.target)} L`)),
+      h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Water'), h('span', { class: 'sub' }, `${L(w.ml)} of ${L(w.target)} L`,
+        // Points for water: 5 at the target, a little more (up to 7) for each litre over it.
+        w.points !== undefined ? h('span', { class: `match-chip ${w.ml >= w.target ? 'good' : ''}`, title: 'Water points: 5 at your target, up to 7 above it' }, waterLabel(w)) : null)),
       h('button', { class: 'textbtn', onclick: () => act.water(500) }, '+ 500 ml')),
     h('div', { class: 'glasses', role: 'group', 'aria-label': `Water, ${L(w.ml)} of ${L(w.target)} litres` },
       Array.from({ length: glasses }, (_, i) => h('button', {
@@ -386,9 +395,9 @@ function workoutRow(tr, isToday) {
   const ci = tr.checkin?.status;
   if (tr.restDay) {
     // A rest day: earns the training points when the day is logged (within the plan's rest days).
-    const sub = ci === 'approved' ? (tr.state?.extraSession ? 'Extra session: +30 points and a +10 bonus' : 'Trained anyway and checked in: +30 points')
+    const sub = ci === 'approved' ? 'Trained on a rest day: 20 + 10 = 30 points'
       : tr.rest && !tr.rest.counts ? 'Extra rest day this week: no training points. Tap to train instead.'
-        : isToday ? (tr.extraBonus ? 'Recovery counts. Train anyway for a +10 bonus.' : 'Recovery counts. Training today? Tap to switch.') : 'Recovery counts.';
+        : isToday ? 'Rest day: 20 points when you log today. Train anyway for +10.' : 'Rest day: 20 points when the day is logged.';
     return h('a', { class: `strip ${ci === 'approved' ? 'done' : ''}`, href: '#/train' }, h('span', { class: 'ico' }, icon(ci === 'approved' ? 'check' : 'train', 22)),
       h('span', { class: 'grow' }, h('span', { class: 'h3' }, 'Rest day'), h('span', { class: 'sub' }, sub)), icon('chevR', 20));
   }
@@ -403,7 +412,10 @@ function workoutRow(tr, isToday) {
 }
 
 /** A meal panel. Fully logged meals fold to one line; tap to review. */
-function mealPanel(m, idx, ui, act, isNext = false, match = null) {
+function mealPanel(m, idx, ui, act, isNext = false, mealScore = null) {
+  const match = mealScore?.match ?? null;
+  // Eating-out food in this meal earns when the meal still matches its plan (score.meals[].offCounted).
+  const offCounted = mealScore?.offCounted ?? null;
   // The meal's numbers include what was added to it (the coffee with breakfast counts as breakfast).
   const planned = m.items.reduce((a, i) => a + i.kcal, 0) + (m.extras ?? []).reduce((a, e) => a + e.kcal, 0);
   const handled = m.items.filter((i) => i.log).length;
@@ -415,7 +427,7 @@ function mealPanel(m, idx, ui, act, isNext = false, match = null) {
       m.mealSwappedFrom && !complete ? h('span', { class: 'changed-chip' }, 'Today only') : null,
       // How close what was eaten is to this meal's plan (the meal-match points), once anything is logged.
       match !== null ? h('span', { class: `match-chip ${match >= 90 ? 'good' : match < 50 ? 'low' : ''}`, title: 'How close this meal is to its plan: calories, protein, carbs, fat' }, `${match}% match`) : null));
-  const rows = [...m.items.map((it) => itemRow(it, idx, act)), ...extras.map((e) => extraRow(e, act))];
+  const rows = [...m.items.map((it) => itemRow(it, idx, act)), ...extras.map((e) => extraRow(e, act, offCounted))];
   // Add food or a drink to this meal: coffee with breakfast, a juice with lunch.
   const addHere = h('button', { class: 'add-row meal-add', type: 'button', onclick: () => act.add(idx), 'aria-label': `Add food or a drink to ${m.name.toLowerCase()}` }, icon('plus', 18), 'Add food or drink');
   if (complete && !ui.open.has(idx)) {
@@ -468,13 +480,15 @@ function itemRow(it, mealIdx, act) {
 }
 
 /** An added food or drink inside a meal (or not placed yet): ⋯ moves it to another meal or removes it. */
-function extraRow(e, act) {
+function extraRow(e, act, offCounted = null) {
+  // Eating-out food: "counts" when its meal still matches the plan, else it is calories only.
+  const kind = !e.offplan ? 'added' : offCounted ? 'counts in this meal' : e.treat ? 'eating out' : 'added';
   return h('div', { class: 'item extra', 'data-state': 'eaten' },
     h('button', { class: 'rowbtn', type: 'button', onclick: () => act.extra(e), 'aria-label': `${e.name}, ${e.amount ?? 'custom entry'}, ${fmt(e.kcal)} kcal, added. Move or remove` },
       h('span', { class: 'tick added', 'aria-hidden': 'true' }, icon('plus', 12)),
       h('span', { class: 'item-main', style: 'padding:0;min-height:0' },
         h('span', { class: 'name-row' }, h('span', { class: 'item-name' }, shortName(e.name))),
-        h('span', { class: 'item-amt' }, `${e.amount ?? (e.grams ? `${e.grams} g` : 'Custom entry')} · ${e.offplan ? 'logging only' : 'added'}`)),
+        h('span', { class: 'item-amt' }, `${e.amount ?? (e.grams ? `${e.grams} g` : 'Custom entry')} · ${kind}`)),
       h('span', { class: 'item-kcal' }, fmt(e.kcal))),
     h('button', { class: 'more', type: 'button', 'aria-label': `Move or remove ${e.name}`, onclick: () => act.extra(e) }, icon('dots', 20)));
 }
@@ -506,7 +520,7 @@ function extraSheet(e, d, { date, onDone, remove }) {
     return h('div', { class: 'stack-lg' },
       h('div', { class: 'stack' },
         h('p', { class: 'eyebrow' }, `${e.amount ?? 'Custom entry'} · ${fmt(e.kcal)} kcal`),
-        h('p', { class: 'sub' }, e.offplan ? 'Logging only: it counts toward today\'s calories, but only planned food earns points.' : 'Added on top of your plan: it counts toward today\'s calories, but only planned food earns points.')),
+        h('p', { class: 'sub' }, !e.foodId ? 'Custom entry: it counts toward today\'s calories, but earns no points.' : e.offplan ? 'Eating out: it counts toward today\'s calories, and earns points when its meal still matches the plan (about 30% off at most).' : 'A diet food added to your plan: it counts toward today\'s calories and the meal\'s points.')),
       h('div', { class: 'stack' }, h('p', { class: 'h3' }, e.meal === null ? 'Which meal was it with?' : 'Move to another meal'),
         h('div', { class: 'meal-chips', role: 'group', 'aria-label': 'Meals' }, d.meals.map((m, mi) => h('button', {
           type: 'button', class: 'chip', 'aria-pressed': String(e.meal === mi), disabled: e.meal === mi ? true : null, onclick: (ev) => move(mi, ev.currentTarget),
@@ -516,32 +530,41 @@ function extraSheet(e, d, { date, onDone, remove }) {
   });
 }
 
+/** "14/20", or for water past its target "5 + 1.1" (the bonus is fractional, so one decimal). */
+function ptsValue(got, max) {
+  if (!max) return fmt(Math.round(got));
+  if (got > max) return `${max} + ${(Math.round((got - max) * 10) / 10).toLocaleString('en-US')}`;
+  return `${fmt(Math.round(got))}/${max}`;
+}
+
 /** Today's points, part by part, with the rule behind each and what would raise it. */
 function pointsSheet(s, d, isToday) {
   if (!s?.parts) return;
   const p = s.parts;
   const goal = state.me?.profile?.goal;
   const rows = [
-    ['Calories', p.calories, 20, 'From diet food: within 10% of your target is full marks.'],
-    ['Protein', p.protein, 20, 'From diet food: 90% of your protein target or more.'],
-    ['Meals matched', p.meals, 20, 'Each meal\'s diet food vs its plan (calories, protein, carbs, fat). Within 10% is full marks; bigger meals count more.'],
+    ['Calories', p.calories, 20, 'From food that counts: within 10% of your target is full marks.'],
+    ['Protein', p.protein, 20, 'From food that counts: 90% of your protein target or more.'],
+    ['Meals matched', p.meals, 20, 'Each meal vs its plan (calories, protein, carbs, fat). Within 10% is full marks; bigger meals count more. Eating out counts when the meal still matches.'],
     ['Logged on the day', p.logging, 10, 'Logging the same day you eat.'],
-    p.workout !== undefined ? ['Training', p.workout, 30, 'Gym check-in on training days; rest days count when the day is logged.'] : null,
-    p.bonus ? ['Extra session', p.bonus, 10, 'Trained on a planned rest day.'] : null,
+    p.workout !== undefined ? ['Training', p.workout, p.bonus ? 20 : 30, p.bonus ? 'Rest day, logged.' : 'A gym check-in is 30 on any day. A logged rest day is 20.'] : null,
+    p.bonus ? ['Gym on a rest day', p.bonus, 10, 'Trained on a rest day: 20 + 10, the same 30 as a training day.'] : null,
+    p.water !== undefined ? ['Water', p.water, 5, `${d.water?.target ? `Drinking your ${(d.water.target / 1000).toLocaleString('en-US', { maximumFractionDigits: 2 })} L target` : 'Your water target'} is 5. More adds a little, less each litre, up to 7.`] : null,
     p.over ? ['Over target', p.over, null, goal === 'maintain' ? 'Maintaining: more than 10% over your calories costs 1 point per % (all food counts).' : 'Cutting: more than 5% over your calories costs 1 point per % (all food counts).'] : null,
   ].filter(Boolean);
   // Logging-only food (pizza, coffee drinks, sauces) and custom entries: counted, never scored.
-  const extrasKcal = [...d.extras, ...d.meals.flatMap((m) => m.extras ?? [])].filter((e) => e.offplan || !e.foodId).reduce((a, e) => a + e.kcal, 0);
+  // Eating-out food in a meal that still matched its plan counted, so it is left out here.
+  const extrasKcal = [...d.extras, ...d.meals.flatMap((m, mi) => (m.extras ?? []).filter((e) => !(e.offplan && s.meals?.[mi]?.offCounted)))].filter((e) => e.offplan || !e.foodId).reduce((a, e) => a + e.kcal, 0);
   const matches = (s.meals ?? []).filter((m) => m.match !== null);
   sheet(isToday ? 'Today\'s points' : 'Points that day', () => h('div', { class: 'stack' },
     h('div', { class: 'pts-total' }, h('b', { class: s.total >= 70 ? 'good' : '' }, s.total), h('span', {}, s.total >= 70 ? 'points · a 70+ day' : `points · ${70 - s.total} more for a 70+ day`)),
     h('div', { class: 'pts-rows' }, rows.map(([label, got, max, why]) => h('div', { class: 'pts-row' },
       h('span', { class: 'grow' }, h('span', { class: 'strong' }, label), h('span', { class: 'sub' }, why)),
-      h('span', { class: `pts-val ${got < 0 ? 'neg' : max && got >= max ? 'full' : ''}` }, max ? `${fmt(Math.round(got))}/${max}` : fmt(Math.round(got)))))),
+      h('span', { class: `pts-val ${got < 0 ? 'neg' : max && got >= max ? 'full' : ''}` }, ptsValue(got, max))))),
     // Each meal's match, so "meals matched 12/20" says which meal cost the points.
     matches.length ? h('div', { class: 'pts-meals', 'aria-label': 'How close each meal was to its plan' }, (s.meals ?? []).map((m) => h('span', { class: `pts-meal ${m.match === null ? 'none' : m.match >= 90 ? 'good' : m.match < 50 ? 'low' : ''}` },
       h('span', {}, m.name), h('b', {}, m.match === null ? '–' : `${m.match}%`)))) : null,
-    extrasKcal ? h('p', { class: 'notice' }, `${fmt(extrasKcal)} kcal today came from off-plan food or custom entries. It counts toward your calories, but earns no points.`) : null,
+    extrasKcal ? h('p', { class: 'notice' }, `${fmt(extrasKcal)} kcal today came from eating out that did not fit a meal\'s plan, or custom entries. It counts toward your calories, but earns no points.`) : null,
     // Where the penalty starts, in kcal, so "going over" is a number and not a guess.
     goal === 'cut' || goal === 'maintain' ? h('p', { class: 'sub' }, `Over ${fmt(Math.round(d.targets.kcal * (goal === 'cut' ? 1.05 : 1.1)))} kcal (all food counted), each 1% more costs a point.`) : null,
     h('a', { class: 'btn ghost block', href: '#/progress' }, 'See your progress')));
@@ -640,7 +663,7 @@ function addSheet({ date, today, reload, getDay, ask, meal = null }) {
       const p = amountPicker({ units: f.units, grams: 0, per100: f });
       area.replaceChildren(h('div', { class: 'stack' },
         h('p', { class: 'h3' }, f.name),
-        f.offplan ? h('p', { class: 'sub' }, f.treat ? 'Eating out & treats · typical values · logging only' : 'Logging only · counts toward calories, earns no points') : null,
+        f.offplan ? h('p', { class: 'sub' }, `${f.treat ? 'Eating out & treats' : 'Everyday food'} · typical values · earns points when its meal still matches your plan`) : null,
         p.el,
         h('div', { class: 'row-flex' },
           h('button', { class: 'btn', onclick: () => { const v = p.value(); if (v.grams > 0) add({ foodId: f.id, unit: v.unit, qty: v.qty }, amountLabel(v.label, f.name), { treat: f.treat, kcal: Math.round((f.kcal * v.grams) / 100) }); } }, 'Add'),

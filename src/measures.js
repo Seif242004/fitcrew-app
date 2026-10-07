@@ -13,6 +13,7 @@
 const M = (name, plural, g, half = true) => ({ name, plural, g, half });
 
 import { OFFPLAN_MEASURES } from './offplan-foods.js';
+import { MORE_DIET_MEASURES } from './foods-more.js';
 
 export const MEASURES = {
   // protein
@@ -150,11 +151,14 @@ export const MEASURES = {
   kebab: [M('skewer', 'skewers', 80)],
   basa: [M('fillet', 'fillets', 150)],
   bouri: [M('fish', 'fish', 250)],
+  // Session-13 diet foods carry their own measures (foods-more.js).
+  ...MORE_DIET_MEASURES,
 };
 
 // Plural forms of the seed units (foods-seed.js `unit.name`).
-const PLURAL = { glass: 'glasses', loaf: 'loaves', sandwich: 'sandwiches', hawawshi: 'hawawshi', tbsp: 'tbsp', tsp: 'tsp', white: 'whites', bowl: 'bowls', cup: 'cups' };
-const plural = (name) => PLURAL[name] ?? `${name}s`;
+const PLURAL = { tomato: 'tomatoes', potato: 'potatoes', glass: 'glasses', loaf: 'loaves', sandwich: 'sandwiches', hawawshi: 'hawawshi', tbsp: 'tbsp', tsp: 'tsp', white: 'whites', bowl: 'bowls', cup: 'cups' };
+const plural = (name) => PLURAL[name]
+  ?? (/(ch|sh|s|x)$/.test(name) ? `${name}es` : /[^aeiou]y$/.test(name) ? `${name.slice(0, -1)}ies` : `${name}s`);
 // Seed units that may be halved (half a loaf, 1½ bowls). Eggs, slices, pieces... are whole.
 const HALF = new Set(['loaf', 'bowl', 'cup', 'tbsp', 'banana', 'apple', 'orange', 'bottle', 'sandwich', 'hawawshi']);
 

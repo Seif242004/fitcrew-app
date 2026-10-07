@@ -36,7 +36,9 @@ async function boot() {
   const restDays = days.filter((d) => !trainDays.includes(d));
   /** Log every planned food of a day, so a rest day has something logged. */
   const eat = async (d) => { const t = (await call('GET', `/api/today?date=${d}`)).body; for (const m of t.meals) for (const it of m.items) await call('POST', '/api/log', { date: d, today: d, ref: it.key, status: 'eaten' }); };
-  const workout = async (d) => (await call('GET', `/api/adherence?days=7&today=${addDays(SAT, 6)}`)).body.scores.find((s) => s.date === d)?.parts.workout;
+  const parts = async (d) => (await call('GET', `/api/adherence?days=7&today=${addDays(SAT, 6)}`)).body.scores.find((s) => s.date === d)?.parts;
+  // Training points: the workout part plus the +10 for training on a rest day.
+  const workout = async (d) => { const p = await parts(d); return p && p.workout + p.bonus; };
   return { db, uid, call, plan, trainDays, restDays, eat, workout, close: () => server.close() };
 }
 
@@ -86,8 +88,8 @@ test('training points come from the check-in; rest days count up to the plan\'s 
   const { trainDays, restDays } = app;
   for (const d of [...trainDays, ...restDays]) await app.eat(d);
 
-  // Planned rest days (3 with a 4-day plan): 30 each. Training days without a check-in: 0.
-  for (const d of restDays) assert.equal(await app.workout(d), 30, `rest ${d}`);
+  // Planned rest days (3 with a 4-day plan): 20 each. Training days without a check-in: 0.
+  for (const d of restDays) assert.equal(await app.workout(d), 20, `rest ${d}`);
   for (const d of trainDays) assert.equal(await app.workout(d), 0, `no check-in ${d}`);
 
   // A check-in earns all 30, sets or not (CrossFit counts).
@@ -105,5 +107,5 @@ test('training points come from the check-in; rest days count up to the plan\'s 
   // ...unless they train on one of the rest days instead (a check-in never uses up a rest day).
   await app.call('POST', `/api/admin/users/${app.uid}/checkins`, { date: restDays[0] });
   assert.equal(await app.workout(restDays[0]), 30);
-  assert.equal(await app.workout(extraDay), 30, 'swapped: still 3 rest days');
+  assert.equal(await app.workout(extraDay), 20, 'swapped: still 3 rest days');
 });
