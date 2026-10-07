@@ -4,6 +4,7 @@ import http from 'node:http';
 import { mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { openDb } from '../src/db.js';
 import { persistConfig, restore, createSaver, seal, open } from '../src/persist.js';
 
@@ -115,7 +116,7 @@ test('the real server restores your account after its disk is wiped', async (t) 
   const gh = await fakeGithub(); t.after(gh.close);
   const run = (dbFile, port) => {
     const child = spawn(process.execPath, ['--no-warnings', 'server.js'], {
-      cwd: path.join(path.dirname(new URL(import.meta.url).pathname), '..'),
+      cwd: path.join(path.dirname(fileURLToPath(import.meta.url)), '..'), // fileURLToPath, not .pathname: works on Windows
       env: { ...process.env, ...env(gh.url, { PERSIST_DEBOUNCE_MS: '50' }), FITCREW_DB: dbFile, PORT: String(port) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -130,6 +131,14 @@ test('the real server restores your account after its disk is wiped', async (t) 
   assert.equal((await waitUp(3911)).needsSetup, true);
   const r = await fetch('http://127.0.0.1:3911/api/setup', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-FitCrew': '1' }, body: JSON.stringify({ name: 'Haged', email: 'h@example.com', password: 'a-good-password' }) });
   assert.equal(r.status, 200);
+  // Windows has no real SIGTERM (kill is immediate), so there let the debounced save land first.
+  if (process.platform === 'win32') {
+    // wait for a save after setup, then until saves stop for 500 ms (the startup save may still be in flight)
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const before = gh.st.commits.length;
+    for (let i = 0; i < 50 && gh.st.commits.length === before; i++) await sleep(100);
+    for (let n = -1, i = 0; i < 20 && n !== gh.st.commits.length; i++) { n = gh.st.commits.length; await sleep(500); }
+  }
   one.child.kill('SIGTERM');          // the host stops the app: it must save first
   await exited(one.child);
 
