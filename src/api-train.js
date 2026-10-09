@@ -2,7 +2,7 @@
 // history and records, plus the admin side (plan editor, check-in review, plan clean-up).
 import crypto from 'node:crypto';
 import { autoReview } from './review.js';
-import { loadExercises, getSetting } from './db.js';
+import { loadExercises, getSetting, touchCatalog } from './db.js';
 import { generateWorkoutPlan, nextTarget, e1rm, videoFor, planWeek, isDeloadWeek, deloadSets, deloadRir, deloadWeight, CYCLE_WEEKS, swapOptions, MUSCLES, PATTERNS, cardioFor, SPLITS, splitDaysError, INTENSITY } from './workout.js';
 import { pushToUser } from './push.js';
 import { pickSplit } from './split-ai.js';
@@ -786,6 +786,7 @@ export function registerTrain(c) {
   route('POST', '/api/admin/exercises', 'admin', (ctx) => {
     const e = cleanExercise(ctx.body);
     ctx.db.prepare('INSERT INTO exercises (id,name,muscle,equip,pattern,inc,timed,notes,video,custom) VALUES (?,?,?,?,?,?,?,?,?,1)').run(e.id, e.name, e.muscle, e.equip, e.pattern, e.inc, e.timed ? 1 : 0, e.notes, e.video);
+    touchCatalog(ctx.db);
     audit(ctx.db, ctx.user.id, 'exercise.created', null, { id: e.id });
     return { ok: true, id: e.id };
   });
@@ -794,12 +795,14 @@ export function registerTrain(c) {
     if (!ctx.db.prepare('SELECT 1 FROM exercises WHERE id = ?').get(ctx.params.id)) throw notFound('Exercise not found');
     const e = cleanExercise(ctx.body, ctx.params.id);
     ctx.db.prepare('UPDATE exercises SET name=?, muscle=?, equip=?, pattern=?, inc=?, timed=?, notes=?, video=?, edited=1 WHERE id = ?').run(e.name, e.muscle, e.equip, e.pattern, e.inc, e.timed ? 1 : 0, e.notes, e.video, e.id);
+    touchCatalog(ctx.db);
     audit(ctx.db, ctx.user.id, 'exercise.updated', null, { id: e.id });
     return { ok: true };
   });
 
   route('DELETE', '/api/admin/exercises/:id', 'admin', (ctx) => {
     ctx.db.prepare('UPDATE exercises SET active = 0 WHERE id = ?').run(ctx.params.id);
+    touchCatalog(ctx.db);
     audit(ctx.db, ctx.user.id, 'exercise.deactivated', null, { id: ctx.params.id });
     return { ok: true };
   });
