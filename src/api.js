@@ -10,7 +10,7 @@ import { getSetting, setSetting } from './db.js';
 import { coachTurn, actionLabel, chat as aiChat } from './coach.js';
 import { vapidKeys, pushToUser } from './push.js';
 import { ALLERGEN_TAGS } from './foods-seed.js';
-import { loadFoods, rowToFood } from './db.js';
+import { loadFoods, rowToFood, offplanIds, touchCatalog } from './db.js';
 import { hashPassword, verifyPassword, newToken, hashToken, newInviteCode, checkPasswordStrength } from './auth.js';
 import { dayScore, streak, mealMatch, waterPoints, OFFPLAN_MEAL_MATCH } from './adherence.js';
 import { registerTrain, workoutState, attendance, weekStart } from './api-train.js';
@@ -247,7 +247,6 @@ const roundMacros = (m) => ({ kcal: Math.round(m.kcal), p: r1(m.p), c: r1(m.c), 
  * logging-only foods (pizza, a latte, sauces) and custom entries count toward the day's total,
  * and so toward the over-target penalty, but never earn points.
  */
-const offplanIds = (db) => new Set(db.prepare('SELECT id FROM foods WHERE offplan = 1').all().map((r) => r.id));
 const isPlanLog = (l, off) => !l.ref.startsWith('extra:') && l.status !== 'skipped' && !(l.status === 'swapped' && off.has(l.food_id));
 const isDietExtra = (l, off) => l.ref.startsWith('extra:') && l.food_id && !off.has(l.food_id);
 
@@ -1564,6 +1563,7 @@ route('POST', '/api/admin/foods', 'admin', (ctx) => {
   const f = cleanFood(ctx.body);
   ctx.db.prepare('INSERT INTO foods (id,name,cat,kcal,p,c,f,roles,tags,veg,step,max,offplan,custom) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)')
     .run(f.id, f.name, f.cat, f.kcal, f.p, f.c, f.f, JSON.stringify(f.offplan ? [] : f.roles), JSON.stringify(f.tags), f.veg ? 1 : 0, f.step, f.max, f.offplan ? 1 : 0);
+  touchCatalog(ctx.db);
   audit(ctx.db, ctx.user.id, 'food.created', null, { id: f.id, name: f.name });
   return { ok: true, id: f.id };
 });
@@ -1574,12 +1574,14 @@ route('PUT', '/api/admin/foods/:id', 'admin', (ctx) => {
   const f = cleanFood({ ...rowToFood(row), ...ctx.body }, row.id);
   ctx.db.prepare('UPDATE foods SET name=?,cat=?,kcal=?,p=?,c=?,f=?,roles=?,tags=?,veg=?,step=?,max=?,edited=1 WHERE id = ?')
     .run(f.name, f.cat, f.kcal, f.p, f.c, f.f, JSON.stringify(f.roles), JSON.stringify(f.tags), f.veg ? 1 : 0, f.step, f.max, row.id);
+  touchCatalog(ctx.db);
   audit(ctx.db, ctx.user.id, 'food.updated', null, { id: row.id });
   return { ok: true };
 });
 
 route('DELETE', '/api/admin/foods/:id', 'admin', (ctx) => {
   ctx.db.prepare('UPDATE foods SET active = 0 WHERE id = ?').run(ctx.params.id);
+  touchCatalog(ctx.db);
   audit(ctx.db, ctx.user.id, 'food.deactivated', null, { id: ctx.params.id });
   return { ok: true };
 });

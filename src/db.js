@@ -325,6 +325,7 @@ export function initDb(db) {
     seedFoods(db);
     seedExercises(db);
     setSetting(db, 'seedVersion', SEED_VERSION);
+    touchCatalog(db);
   }
   return db;
 }
@@ -339,9 +340,24 @@ function seedExercises(db) {
   for (const e of EXERCISES) up.run(e.id, e.name, e.muscle, e.equip, e.pattern, e.inc, e.timed ? 1 : 0, e.notes, e.video ?? '');
 }
 
-export const loadExercises = (db, { includeInactive = false } = {}) =>
-  db.prepare(`SELECT * FROM exercises ${includeInactive ? '' : 'WHERE active = 1'} ORDER BY name`).all()
-    .map((r) => ({ id: r.id, name: r.name, muscle: r.muscle, equip: r.equip, pattern: r.pattern, inc: r.inc, timed: Boolean(r.timed), notes: r.notes, video: r.video ?? '', custom: Boolean(r.custom) }));
+// ---------------------------------------------------------------- catalogue cache
+// The food (635 rows) and exercise (95 rows) libraries change only when the admin edits them or a
+// seed upgrade runs, but nearly every request used to re-read them whole (Cloudflare bills every
+// row a query scans as rows_read). They are now read once per database and kept in memory;
+// every write to those tables calls touchCatalog() so the next read reloads them. The cached
+// objects are frozen so a caller cannot change the shared copy by accident.
+const catalog = new WeakMap(); // db -> { foods, exercises, offplanIds }
+export const touchCatalog = (db) => { catalog.delete(db); };
+const deepFreeze = (o) => { if (o && typeof o === 'object' && !Object.isFrozen(o)) { Object.freeze(o); Object.values(o).forEach(deepFreeze); } return o; };
+const cached = (db) => { let c = catalog.get(db); if (!c) catalog.set(db, c = {}); return c; };
+
+export function loadExercises(db, { includeInactive = false } = {}) {
+  const c = cached(db);
+  c.exercises ??= db.prepare('SELECT * FROM exercises ORDER BY name').all()
+    .map((r) => deepFreeze({ id: r.id, name: r.name, muscle: r.muscle, equip: r.equip, pattern: r.pattern, inc: r.inc, timed: Boolean(r.timed), notes: r.notes, video: r.video ?? '', custom: Boolean(r.custom) }));
+  c.inactiveEx ??= new Set(db.prepare('SELECT id FROM exercises WHERE active = 0').all().map((r) => r.id));
+  return includeInactive ? c.exercises.slice() : c.exercises.filter((e) => !c.inactiveEx.has(e.id));
+}
 
 /** Additive column migrations for databases created by older versions. */
 function migrate(db) {
@@ -410,5 +426,19 @@ export function rowToFood(r) {
  *   offplan: true          also include off-plan foods (food search and logging)
  *   includeInactive: true  everything, for looking up foods by id (old logs, old plans)
  */
-export const loadFoods = (db, { includeInactive = false, offplan = false } = {}) =>
-  db.prepare(`SELECT * FROM foods ${includeInactive ? '' : `WHERE active = 1${offplan ? '' : ' AND offplan = 0'}`} ORDER BY name`).all().map(rowToFood);
+export function loadFoods(db, { includeInactive = false, offplan = false } = {}) {
+  const c = cached(db);
+  if (!c.foods) {
+    const rows = db.prepare('SELECT * FROM foods ORDER BY name').all();
+    c.foods = rows.map((r) => deepFreeze(rowToFood(r)));
+    c.inactiveFoods = new Set(rows.filter((r) => !r.active).map((r) => r.id));
+  }
+  if (includeInactive) return c.foods.slice();
+  return c.foods.filter((f) => !c.inactiveFoods.has(f.id) && (offplan || !f.offplan));
+}
+
+/** Ids of the off-plan (logging-only) foods, from the cached library. */
+export function offplanIds(db) {
+  const c = cached(db);
+  return c.offplanIds ??= new Set(loadFoods(db, { includeInactive: true }).filter((f) => f.offplan).map((f) => f.id));
+}
