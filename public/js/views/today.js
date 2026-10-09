@@ -34,7 +34,7 @@ export async function todayView() {
       api('GET', `/api/today?date=${date}`),
       api('GET', `/api/train?date=${date}`).catch(() => null),
       api('GET', `/api/adherence?days=14&today=${today}`).catch(() => ({ scores: [] })),
-      own ? api('GET', '/api/metrics').catch(() => null) : null,
+      own ? api('GET', '/api/metrics?limit=14').catch(() => null) : null,
       own && weekend ? api('GET', `/api/recap?today=${today}`).catch(() => null) : null,
       // Adaptive weekly check-in: opens Friday to Sunday; a proposed change stays until answered.
       own ? api('GET', `/api/checkin/weekly?today=${today}`).catch(() => null) : null,

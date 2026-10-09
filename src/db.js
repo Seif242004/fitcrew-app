@@ -3,6 +3,7 @@ import { OFFPLAN_FOODS } from './offplan-foods.js';
 // Diet foods (plans, swaps) and off-plan foods (logging only) share the foods table; `offplan` tells them apart.
 const ALL_FOODS = [...FOODS, ...OFFPLAN_FOODS];
 import { EXERCISES } from './workout.js';
+import { rebuildAllRecords } from './records.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -142,6 +143,18 @@ CREATE TABLE IF NOT EXISTS set_logs (
   UNIQUE (user_id, date, exercise_id, set_no)
 );
 CREATE INDEX IF NOT EXISTS sets_user_ex ON set_logs(user_id, exercise_id, date);
+-- Personal records, one row per person and exercise (records.js): keeps the Train screens from
+-- re-reading all of a person's sets.
+CREATE TABLE IF NOT EXISTS set_records (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  exercise_id TEXT NOT NULL,
+  best_date TEXT NOT NULL,
+  best_weight REAL NOT NULL,
+  best_reps INTEGER NOT NULL,
+  best_score REAL NOT NULL,
+  max_e1rm REAL NOT NULL,
+  PRIMARY KEY (user_id, exercise_id)
+);
 CREATE TABLE IF NOT EXISTS cardio_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -320,6 +333,8 @@ const SEED_VERSION = `${ALL_FOODS.reduce((a, f) => a + f.roles.join().length, 0)
 export function initDb(db) {
   db.exec(SCHEMA);
   migrate(db);
+  // Existing databases: build the personal-records table once from the sets already logged.
+  if (!getSetting(db, 'setRecordsBuilt')) { rebuildAllRecords(db); setSetting(db, 'setRecordsBuilt', true); }
   const seeded = db.prepare("SELECT value FROM settings WHERE key = 'seedVersion'").get()?.value;
   if (seeded !== JSON.stringify(SEED_VERSION)) {
     seedFoods(db);

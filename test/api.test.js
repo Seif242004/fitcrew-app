@@ -225,3 +225,13 @@ test('profile pictures: upload, crew can see, private members hidden, remove', a
   assert.equal((await sam.get('/api/me')).body.user.avatar, null);
   assert.equal((await admin.get(`/api/avatar/${samId}`)).status, 404);
 });
+
+test('metrics ?limit returns only the newest rows, oldest first', async (t) => {
+  const app = await boot();
+  t.after(app.close);
+  const admin = app.client();
+  await admin.post('/api/setup', { name: 'Haged', email: 'haged@example.com', password: 'a-good-password' });
+  for (const d of ['2026-10-01', '2026-10-02', '2026-10-03']) await admin.post('/api/metrics', { date: d, weightKg: 80 });
+  assert.equal((await admin.get('/api/metrics')).body.metrics.length, 3);
+  assert.deepEqual((await admin.get('/api/metrics?limit=2')).body.metrics.map((m) => m.date), ['2026-10-02', '2026-10-03']);
+});

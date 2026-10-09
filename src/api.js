@@ -1318,7 +1318,11 @@ route('DELETE', '/api/photos/:id', 'user', (ctx) => {
 
 route('GET', '/api/metrics', 'user', (ctx) => {
   const uid = subjectId(ctx);
-  const rows = ctx.db.prepare('SELECT date, weight_kg, measurements, notes FROM body_metrics WHERE user_id = ? ORDER BY date').all(uid);
+  // ?limit=N returns only the newest N rows (Today just needs the last weigh-in); without it, everything (Progress charts).
+  const limit = Math.round(Number(ctx.query.get('limit')));
+  const rows = limit >= 1
+    ? ctx.db.prepare('SELECT date, weight_kg, measurements, notes FROM body_metrics WHERE user_id = ? ORDER BY date DESC LIMIT ?').all(uid, Math.min(limit, 500)).reverse()
+    : ctx.db.prepare('SELECT date, weight_kg, measurements, notes FROM body_metrics WHERE user_id = ? ORDER BY date').all(uid);
   return { metrics: rows.map((r) => ({ date: r.date, weightKg: r.weight_kg, measurements: JSON.parse(r.measurements), notes: r.notes })) };
 });
 
@@ -1517,7 +1521,7 @@ route('POST', '/api/admin/cleanup', 'admin', (ctx) => {
 // check-ins, coach chat, feed, competition history) but keeps the accounts, passwords, sign-in
 // sessions and notification subscriptions, plus the food and exercise libraries and settings.
 // Everyone stays signed in and lands in setup again on their next open. Needs the exact phrase.
-const FRESH_START_TABLES = ['reactions', 'activity', 'competition_results', 'diet_checkins', 'day_overrides', 'set_logs', 'cardio_logs', 'checkins', 'body_assessments',
+const FRESH_START_TABLES = ['reactions', 'activity', 'competition_results', 'diet_checkins', 'day_overrides', 'set_logs', 'set_records', 'cardio_logs', 'checkins', 'body_assessments',
   'photos', 'body_metrics', 'water_logs', 'day_swaps', 'meal_swaps', 'logs', 'change_requests', 'coach_messages', 'jobs_run', 'workout_plans', 'plans', 'profiles'];
 route('POST', '/api/admin/fresh-start', 'admin', (ctx) => {
   if (ctx.body.confirm !== 'START OVER') throw bad('Type START OVER to confirm');

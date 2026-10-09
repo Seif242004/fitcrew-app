@@ -3,6 +3,7 @@
 import crypto from 'node:crypto';
 import { autoReview } from './review.js';
 import { loadExercises, getSetting, touchCatalog } from './db.js';
+import { getRecord, noteSet, refreshRecord } from './records.js';
 import { generateWorkoutPlan, nextTarget, e1rm, videoFor, planWeek, isDeloadWeek, deloadSets, deloadRir, deloadWeight, CYCLE_WEEKS, swapOptions, MUSCLES, PATTERNS, cardioFor, SPLITS, splitDaysError, INTENSITY } from './workout.js';
 import { pushToUser } from './push.js';
 import { pickSplit } from './split-ai.js';
@@ -418,12 +419,19 @@ export function registerTrain(c) {
   });
 
   function logSet(ctx, uid, { date, loggedOn, exId, setNo, weightKg, reps, rpe }) {
-    const prev = ctx.db.prepare('SELECT weight_kg, reps FROM set_logs WHERE user_id = ? AND exercise_id = ? AND NOT (date = ? AND set_no = ?)').all(uid, exId, date, setNo);
-    const prevBest = Math.max(0, ...prev.map((r) => e1rm(r.weight_kg, r.reps)));
+    // A brand-new set is compared with the stored record (no history read). Re-saving an existing
+    // set is rare: compare with the exercise's other sets, then rebuild the record from them.
+    const existing = ctx.db.prepare('SELECT 1 FROM set_logs WHERE user_id = ? AND date = ? AND exercise_id = ? AND set_no = ?').get(uid, date, exId, setNo);
+    let prevBest;
+    if (existing) {
+      const prev = ctx.db.prepare('SELECT weight_kg, reps FROM set_logs WHERE user_id = ? AND exercise_id = ? AND NOT (date = ? AND set_no = ?)').all(uid, exId, date, setNo);
+      prevBest = Math.max(0, ...prev.map((r) => e1rm(r.weight_kg, r.reps)));
+    } else prevBest = getRecord(ctx.db, uid, exId)?.max_e1rm ?? 0;
     const now = e1rm(weightKg, reps);
     ctx.db.prepare(`INSERT INTO set_logs (user_id, date, exercise_id, set_no, weight_kg, reps, rpe, logged_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (user_id, date, exercise_id, set_no) DO UPDATE SET weight_kg = excluded.weight_kg, reps = excluded.reps, rpe = excluded.rpe, logged_on = excluded.logged_on`)
       .run(uid, date, exId, setNo, weightKg, reps, rpe ?? null, loggedOn);
+    if (existing) refreshRecord(ctx.db, uid, exId); else noteSet(ctx.db, uid, exId, { date, weightKg, reps });
     const pr = prevBest > 0 && now > prevBest + 1e-9;
     if (pr) {
       const name = ctx.db.prepare('SELECT name FROM exercises WHERE id = ?').get(exId)?.name ?? exId;
@@ -504,15 +512,19 @@ export function registerTrain(c) {
 
   route('POST', '/api/train/set/remove', 'user', (ctx) => {
     const uid = subjectId(ctx, ctx.body);
+    const exId = str(ctx.body.exerciseId, 60, 'exercise', true);
     ctx.db.prepare('DELETE FROM set_logs WHERE user_id = ? AND date = ? AND exercise_id = ? AND set_no = ?')
-      .run(uid, needDate(ctx.body.date), str(ctx.body.exerciseId, 60, 'exercise', true), Math.round(num(ctx.body.setNo, 1, 20, 'set number')));
+      .run(uid, needDate(ctx.body.date), exId, Math.round(num(ctx.body.setNo, 1, 20, 'set number')));
+    refreshRecord(ctx.db, uid, exId);
     if (uid !== ctx.user.id) audit(ctx.db, ctx.user.id, 'set.removed_by_admin', uid, { date: ctx.body.date, exId: ctx.body.exerciseId });
     return { ok: true };
   });
 
   route('POST', '/api/train/exercise/clear', 'user', (ctx) => {
     const uid = subjectId(ctx, ctx.body);
-    ctx.db.prepare('DELETE FROM set_logs WHERE user_id = ? AND date = ? AND exercise_id = ?').run(uid, needDate(ctx.body.date), str(ctx.body.exerciseId, 60, 'exercise', true));
+    const exId = str(ctx.body.exerciseId, 60, 'exercise', true);
+    ctx.db.prepare('DELETE FROM set_logs WHERE user_id = ? AND date = ? AND exercise_id = ?').run(uid, needDate(ctx.body.date), exId);
+    refreshRecord(ctx.db, uid, exId);
     return { ok: true };
   });
 
@@ -536,26 +548,24 @@ export function registerTrain(c) {
   route('GET', '/api/train/history', 'user', (ctx) => {
     const uid = subjectId(ctx);
     const exById = new Map(loadExercises(ctx.db, { includeInactive: true }).map((e) => [e.id, e]));
-    const rows = ctx.db.prepare('SELECT date, exercise_id, weight_kg, reps FROM set_logs WHERE user_id = ? ORDER BY date DESC').all(uid);
-    const sessions = new Map();
-    const best = new Map();
-    for (const r of rows) {
-      if (!sessions.has(r.date)) sessions.set(r.date, { date: r.date, sets: 0, volume: 0, ex: new Set() });
-      const s = sessions.get(r.date);
-      s.sets++; s.volume += r.weight_kg * r.reps; s.ex.add(r.exercise_id);
-      const score = r.weight_kg > 0 ? e1rm(r.weight_kg, r.reps) : r.reps / 1000;
-      const cur = best.get(r.exercise_id);
-      if (!cur || score > cur.score) best.set(r.exercise_id, { exerciseId: r.exercise_id, name: exById.get(r.exercise_id)?.name ?? r.exercise_id, timed: Boolean(exById.get(r.exercise_id)?.timed), weightKg: r.weight_kg, reps: r.reps, e1rm: Math.round(e1rm(r.weight_kg, r.reps) * 10) / 10, date: r.date, score });
-    }
+    // Sessions: only the last 30 training days are shown, so only those are read (the unique
+    // index on (user, date, ...) serves the GROUP BY). Records come from set_records, one row per
+    // exercise. This week and last week are read by date range. None of it grows with history.
+    const sessions = new Map(ctx.db.prepare(`SELECT date, COUNT(*) sets, SUM(weight_kg * reps) volume, COUNT(DISTINCT exercise_id) ex FROM set_logs
+      WHERE user_id = ? GROUP BY date ORDER BY date DESC LIMIT 30`).all(uid).map((r) => [r.date, { date: r.date, sets: r.sets, volume: r.volume, ex: { size: r.ex } }]));
+    const records = ctx.db.prepare('SELECT * FROM set_records WHERE user_id = ?').all(uid).map((r) => ({
+      exerciseId: r.exercise_id, name: exById.get(r.exercise_id)?.name ?? r.exercise_id, timed: Boolean(exById.get(r.exercise_id)?.timed),
+      weightKg: r.best_weight, reps: r.best_reps, e1rm: Math.round(e1rm(r.best_weight, r.best_reps) * 10) / 10, date: r.best_date,
+    }));
     const checkins = new Map(ctx.db.prepare("SELECT date, status FROM checkins WHERE user_id = ? ORDER BY date DESC LIMIT 60").all(uid).map((r) => [r.date, r.status]));
     const cardio = ctx.db.prepare('SELECT id, date, kind, minutes, distance_km distanceKm, avg_hr avgHr FROM cardio_logs WHERE user_id = ? ORDER BY date DESC, id DESC LIMIT 20').all(uid);
     const today = isDate(ctx.query.get('today')) ? ctx.query.get('today') : todayUtc();
     return {
       sessions: [...sessions.values()].slice(0, 30).map((s) => ({ date: s.date, sets: s.sets, exercises: s.ex.size, volume: Math.round(s.volume), checkin: checkins.get(s.date) ?? null })),
-      records: [...best.values()].map(({ score, ...r }) => r).sort((a, b) => b.e1rm - a.e1rm || b.reps - a.reps),
+      records: records.sort((a, b) => b.e1rm - a.e1rm || b.reps - a.reps),
       attendance: { last7: attendance(ctx.db, uid, addDays(today, -6), today), last28: attendance(ctx.db, uid, addDays(today, -27), today) },
       cardio,
-      ...weekCompare(rows, exById, today),
+      ...weekCompare(ctx.db.prepare('SELECT date, exercise_id, weight_kg, reps FROM set_logs WHERE user_id = ? AND date >= ? AND date <= ?').all(uid, addDays(weekStart(today), -7), today), exById, today),
     };
   });
 

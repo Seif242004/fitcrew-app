@@ -26,7 +26,7 @@ export function registerCheckin(c) {
   function inputs(db, uid, prof, week, asOf) {
     const from = addDays(week, -RULES.window);
     const intake = db.prepare(`SELECT date, SUM(kcal) kcal FROM logs WHERE user_id = ? AND status != 'skipped' AND date >= ? AND date < ? GROUP BY date`).all(uid, from, week);
-    const weighIns = db.prepare('SELECT date, weight_kg kg FROM body_metrics WHERE user_id = ? AND weight_kg IS NOT NULL AND date <= ? ORDER BY date').all(uid, asOf);
+    const weighIns = db.prepare('SELECT date, weight_kg kg FROM body_metrics WHERE user_id = ? AND weight_kg IS NOT NULL AND date >= ? AND date <= ? ORDER BY date').all(uid, addDays(asOf, -180), asOf); // 180 days: the trend only needs recent weigh-ins (old ones fade out of the EMA)
     const since = db.prepare("SELECT MIN(start_date) d FROM plans WHERE user_id = ? AND status IN ('active','archived')").get(uid)?.d ?? null;
     return { week, targets: JSON.parse(prof.targets), profile: JSON.parse(prof.data), intake, weighIns, since, asOf };
   }
